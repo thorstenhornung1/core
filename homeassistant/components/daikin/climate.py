@@ -36,6 +36,7 @@ from .const import (
 )
 from .coordinator import DaikinConfigEntry, DaikinCoordinator
 from .entity import DaikinEntity
+from .temperature_step import control_step
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -186,7 +187,6 @@ class DaikinClimate(DaikinEntity, ClimateEntity):
     _attr_name = None
     _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_hvac_modes = list(HA_STATE_TO_DAIKIN)
-    _attr_target_temperature_step = 1
     _attr_fan_modes: list[str]
     _attr_swing_modes: list[str]
 
@@ -262,6 +262,12 @@ class DaikinClimate(DaikinEntity, ClimateEntity):
     def native_target_temperature(self) -> float | None:
         """Return the temperature we try to reach."""
         return self.device.target_temperature
+
+    @property
+    @override
+    def target_temperature_step(self) -> float:
+        """Return half degrees only once the device confirmed them."""
+        return control_step(self.device)
 
     @override
     async def async_set_temperature(self, **kwargs: Any) -> None:

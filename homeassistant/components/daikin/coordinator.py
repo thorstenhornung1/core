@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN, TIMEOUT_SEC
+from .temperature_step import DaikinTemperatureStep
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,9 +34,12 @@ class DaikinCoordinator(DataUpdateCoordinator[None]):
             update_interval=timedelta(seconds=TIMEOUT_SEC),
         )
         self.device = device
+        self.temperature_step = DaikinTemperatureStep(hass, entry.entry_id, device)
 
     @override
     async def _async_update_data(self) -> None:
+        # Before polling, so a failed poll does not lose what the last write learned
+        await self.temperature_step.async_save_learned()
         try:
             await self.device.update_status()
         except DaikinException as err:

@@ -12,13 +12,21 @@ from pydaikin.discovery import Discovery
 from pydaikin.exceptions import DaikinException
 from pydaikin.factory import DaikinFactory
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntryState,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_API_KEY, CONF_HOST, CONF_PASSWORD, CONF_UUID
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from homeassistant.util.ssl import client_context_no_verify
 
 from .const import DOMAIN, KEY_MAC, TIMEOUT_SEC
+from .coordinator import DaikinConfigEntry
+from .temperature_step import STATUS_CONFIRMED, STATUS_INFERRED, STATUS_UNKNOWN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,6 +39,15 @@ class FlowHandler(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         """Initialize the Daikin config flow."""
         self.host: str | None = None
+
+    @staticmethod
+    @callback
+    @override
+    def async_get_options_flow(
+        config_entry: DaikinConfigEntry,
+    ) -> DaikinOptionsFlow:
+        """Get the options flow for this handler."""
+        return DaikinOptionsFlow()
 
     @property
     def schema(self) -> probatio.Schema:
@@ -161,3 +178,63 @@ class FlowHandler(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
         self.host = discovery_info.host
         return await self.async_step_user()
+
+
+class DaikinOptionsFlow(OptionsFlow):
+    """Show the learned temperature precision and allow resetting it."""
+
+    config_entry: DaikinConfigEntry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the step that describes the temperature precision status."""
+        if self.config_entry.state is not ConfigEntryState.LOADED:
+            return self.async_abort(reason="not_loaded")
+        status = self.config_entry.runtime_data.temperature_step.status
+        if status == STATUS_CONFIRMED:
+            return await self.async_step_half_degree()
+        if status == STATUS_INFERRED:
+            return await self.async_step_whole_degree()
+        if status == STATUS_UNKNOWN:
+            return await self.async_step_not_verified()
+        return await self.async_step_unavailable()
+
+    async def async_step_half_degree(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show that half degrees are verified."""
+        return self.async_show_menu(step_id="half_degree", menu_options=["reset"])
+
+    async def async_step_whole_degree(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show that whole degrees were detected."""
+        return self.async_show_menu(step_id="whole_degree", menu_options=["reset"])
+
+    async def async_step_not_verified(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show that the precision is not verified yet."""
+        if user_input is None:
+            return self.async_show_form(step_id="not_verified")
+        return self.async_create_entry(data=dict(self.config_entry.options))
+
+    async def async_step_unavailable(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show that the adapter has no automatic detection."""
+        if user_input is None:
+            return self.async_show_form(step_id="unavailable")
+        return self.async_create_entry(data=dict(self.config_entry.options))
+
+    async def async_step_reset(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Forget the learned temperature precision after confirmation."""
+        if user_input is None:
+            return self.async_show_form(step_id="reset")
+        coordinator = self.config_entry.runtime_data
+        await coordinator.temperature_step.async_reset()
+        coordinator.async_update_listeners()
+        return self.async_abort(reason="reset_successful")

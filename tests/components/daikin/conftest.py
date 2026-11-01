@@ -7,9 +7,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import urllib.parse
 
 import pytest
+from pytest_homeassistant.common import MockConfigEntry
+
+from homeassistant.components.daikin.const import DOMAIN, KEY_MAC
+from homeassistant.const import CONF_HOST
+from homeassistant.core import HomeAssistant
 
 type ZoneDefinition = list[str | int]
 type ZoneDevice = MagicMock
+
+ENTRY_ID = "daikin_entry"
+TEMPERATURE_STEP_STORAGE_KEY = f"{DOMAIN}.{ENTRY_ID}.temperature_step"
 
 
 def _decode_zone_values(value: str) -> list[str]:
@@ -45,6 +53,50 @@ def configure_zone_device(
             encoded_zone_temperatures if cooling_values is None else cooling_values
         ),
     }
+
+
+def configure_temperature_step(
+    device: ZoneDevice, status: str, *, half_degree_adapter: bool = True
+) -> None:
+    """Report a pydaikin target temperature step status like a BRP069."""
+    device.target_temperature_step_status = status
+    device.target_temperature_step = (
+        0.5 if half_degree_adapter and status != "inferred" else 1.0
+    )
+
+
+def temperature_step_record(status: str) -> dict[str, Any]:
+    """Return stored temperature step data for the mocked device."""
+    return {
+        "version": 1,
+        "minor_version": 1,
+        "key": TEMPERATURE_STEP_STORAGE_KEY,
+        "data": {
+            "status": status,
+            "device_mac": "00:11:22:33:44:55",
+            "model": "TESTMODEL",
+            "firmware_version": "1_0_0",
+            "last_verified": "2026-11-01T08:00:00+00:00",
+        },
+    }
+
+
+async def async_setup_daikin(
+    hass: HomeAssistant, zone_device: ZoneDevice
+) -> MockConfigEntry:
+    """Set up a Daikin config entry with a mocked library device."""
+    config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        entry_id=ENTRY_ID,
+        unique_id=zone_device.mac,
+        data={CONF_HOST: "127.0.0.1", KEY_MAC: zone_device.mac},
+    )
+    config_entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    return config_entry
 
 
 @pytest.fixture
