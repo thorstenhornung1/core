@@ -9,6 +9,7 @@ import pytest
 from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 
 from homeassistant.components.climate import (
+    ATTR_HVAC_ACTION,
     ATTR_HVAC_MODE,
     ATTR_PRESET_MODE,
     ATTR_TARGET_TEMP_STEP,
@@ -17,6 +18,7 @@ from homeassistant.components.climate import (
     SERVICE_SET_HVAC_MODE,
     SERVICE_SET_PRESET_MODE,
     SERVICE_SET_TEMPERATURE,
+    HVACAction,
     HVACMode,
 )
 from homeassistant.components.daikin.const import DOMAIN, KEY_MAC
@@ -82,6 +84,50 @@ async def test_target_temperature_step_without_library_support(
     await _async_setup_daikin(hass, zone_device)
 
     assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TARGET_TEMP_STEP] == 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "mode_conflict", "expected_action"),
+    [
+        pytest.param("hot", False, HVACAction.HEATING, id="heating"),
+        pytest.param("hot", True, HVACAction.IDLE, id="heat-mode-conflict"),
+        pytest.param("cool", True, HVACAction.IDLE, id="cool-mode-conflict"),
+        pytest.param("off", True, HVACAction.OFF, id="off-mode-conflict"),
+    ],
+)
+async def test_hvac_action_mode_conflict(
+    hass: HomeAssistant,
+    zone_device: ZoneDevice,
+    mode: str,
+    mode_conflict: bool,
+    expected_action: HVACAction,
+) -> None:
+    """A multi-split mode conflict holds the unit idle despite the compressor."""
+    zone_device._mode = mode
+    zone_device.support_compressor_frequency = True
+    zone_device.compressor_frequency = 30
+    zone_device.mode_conflict = mode_conflict
+    await _async_setup_daikin(hass, zone_device)
+
+    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_HVAC_ACTION] == (
+        expected_action
+    )
+
+
+async def test_hvac_action_without_mode_conflict_support(
+    hass: HomeAssistant,
+    zone_device: ZoneDevice,
+) -> None:
+    """The HVAC action works if pydaikin does not report mode conflicts."""
+    del zone_device.mode_conflict
+    zone_device._mode = "hot"
+    zone_device.support_compressor_frequency = True
+    zone_device.compressor_frequency = 30
+    await _async_setup_daikin(hass, zone_device)
+
+    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_HVAC_ACTION] == (
+        HVACAction.HEATING
+    )
 
 
 @pytest.mark.parametrize(

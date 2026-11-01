@@ -276,7 +276,11 @@ class DaikinClimate(DaikinEntity, ClimateEntity):
     @override
     def hvac_action(self) -> HVACAction | None:
         """Return the current state."""
-        ret = HA_STATE_TO_CURRENT_HVAC.get(self.hvac_mode)
+        hvac_mode = self.hvac_mode
+        # Multi-split units in a mode conflict (err=10000) are held in standby
+        if hvac_mode != HVACMode.OFF and getattr(self.device, "mode_conflict", False):
+            return HVACAction.IDLE
+        ret = HA_STATE_TO_CURRENT_HVAC.get(hvac_mode)
         if (
             ret in (HVACAction.COOLING, HVACAction.HEATING)
             and self.device.support_compressor_frequency

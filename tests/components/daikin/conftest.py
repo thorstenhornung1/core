@@ -65,6 +65,7 @@ def zone_device() -> Generator[ZoneDevice]:
     device.support_demand_control = False
     device.get_demand_control = MagicMock(return_value={})
     device.compressor_frequency = 0
+    device.mode_conflict = False
     device.target_temperature_step = 1.0
     device.inside_temperature = 21.0
     device.outside_temperature = 13.0
