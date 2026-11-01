@@ -10,14 +10,27 @@ import pytest
 from pytest_homeassistant.common import async_fire_time_changed
 
 from homeassistant.components.climate import (
+    ATTR_HVAC_MODE,
+    ATTR_PRESET_MODE,
     ATTR_TARGET_TEMP_STEP,
     DOMAIN as CLIMATE_DOMAIN,
+    PRESET_AWAY,
+    SERVICE_SET_HVAC_MODE,
+    SERVICE_SET_PRESET_MODE,
     SERVICE_SET_TEMPERATURE,
+    HVACMode,
 )
 from homeassistant.components.daikin.const import DOMAIN
+from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import ATTR_ENTITY_ID, ATTR_TEMPERATURE
+from homeassistant.const import (
+    ATTR_ENTITY_ID,
+    ATTR_TEMPERATURE,
+    SERVICE_TURN_OFF,
+    SERVICE_TURN_ON,
+)
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
 from .conftest import (
@@ -168,13 +181,13 @@ async def test_fallback_shows_applied_setpoint(
 async def test_failed_write_changes_nothing(
     hass: HomeAssistant, zone_device: ZoneDevice, hass_storage: dict[str, Any]
 ) -> None:
-    """A failed write propagates and neither state nor storage change."""
+    """A rejected write raises and neither the setpoint nor the step change."""
     configure_temperature_step(zone_device, "unknown")
     zone_device.set = AsyncMock(side_effect=DaikinException("ret=PARAM NG"))
     await async_setup_daikin(hass, zone_device)
 
-    with pytest.raises(DaikinException):
-        await _async_set_temperature(hass, 23.5)
+    with pytest.raises(HomeAssistantError):
+        await _async_set_temperature(hass, 17.5)
 
     zone_device.set.assert_awaited_once()
     state = hass.states.get(CLIMATE_ENTITY_ID)
@@ -227,3 +240,127 @@ async def test_status_change_on_poll(
 
     # Unchanged status: no further write
     assert hass_storage[TEMPERATURE_STEP_STORAGE_KEY]["marker"]
+
+
+@pytest.mark.parametrize(
+    ("domain", "service", "entity_id", "service_data", "setter"),
+    [
+        pytest.param(
+            CLIMATE_DOMAIN,
+            SERVICE_SET_TEMPERATURE,
+            CLIMATE_ENTITY_ID,
+            {ATTR_TEMPERATURE: 22.5},
+            "set",
+            id="climate-set-temperature",
+        ),
+        pytest.param(
+            CLIMATE_DOMAIN,
+            SERVICE_SET_HVAC_MODE,
+            CLIMATE_ENTITY_ID,
+            {ATTR_HVAC_MODE: HVACMode.COOL},
+            "set",
+            id="climate-set-hvac-mode",
+        ),
+        pytest.param(
+            CLIMATE_DOMAIN,
+            SERVICE_SET_PRESET_MODE,
+            CLIMATE_ENTITY_ID,
+            {ATTR_PRESET_MODE: PRESET_AWAY},
+            "set_holiday",
+            id="climate-set-preset-mode",
+        ),
+        pytest.param(
+            CLIMATE_DOMAIN,
+            SERVICE_TURN_ON,
+            CLIMATE_ENTITY_ID,
+            {},
+            "set",
+            id="climate-turn-on",
+        ),
+        pytest.param(
+            CLIMATE_DOMAIN,
+            SERVICE_TURN_OFF,
+            CLIMATE_ENTITY_ID,
+            {},
+            "set",
+            id="climate-turn-off",
+        ),
+        pytest.param(
+            CLIMATE_DOMAIN,
+            SERVICE_TURN_OFF,
+            "climate.daikin_test_living_temperature",
+            {},
+            "set_zone",
+            id="zone-climate-turn-off",
+        ),
+        pytest.param(
+            SWITCH_DOMAIN,
+            SERVICE_TURN_ON,
+            "switch.daikin_test_power",
+            {},
+            "set",
+            id="power-switch-turn-on",
+        ),
+        pytest.param(
+            SWITCH_DOMAIN,
+            SERVICE_TURN_OFF,
+            "switch.daikin_test_power",
+            {},
+            "set",
+            id="power-switch-turn-off",
+        ),
+        pytest.param(
+            SWITCH_DOMAIN,
+            SERVICE_TURN_ON,
+            "switch.daikin_test_streamer",
+            {},
+            "set_streamer",
+            id="streamer-switch-turn-on",
+        ),
+        pytest.param(
+            SWITCH_DOMAIN,
+            SERVICE_TURN_OFF,
+            "switch.daikin_test_living",
+            {},
+            "set_zone",
+            id="zone-switch-turn-off",
+        ),
+    ],
+)
+async def test_command_failure_raises_and_refreshes(
+    hass: HomeAssistant,
+    zone_device: ZoneDevice,
+    domain: str,
+    service: str,
+    entity_id: str,
+    service_data: dict[str, Any],
+    setter: str,
+) -> None:
+    """A rejected command raises and the device state is refreshed."""
+    zone_device.support_away_mode = True
+    zone_device.support_advanced_modes = True
+    await async_setup_daikin(hass, zone_device)
+    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TEMPERATURE] == 22
+
+    getattr(zone_device, setter).side_effect = DaikinException(
+        "Daikin rejected the request: ret=PARAM NG"
+    )
+    # The refresh reads the actual device state back
+    zone_device.target_temperature = 21
+    zone_device.update_status.reset_mock()
+
+    with pytest.raises(HomeAssistantError) as err:
+        await hass.services.async_call(
+            domain,
+            service,
+            {ATTR_ENTITY_ID: entity_id, **service_data},
+            blocking=True,
+        )
+
+    assert err.value.translation_domain == DOMAIN
+    assert err.value.translation_key == "command_failed"
+    assert err.value.translation_placeholders == {
+        "error": "Daikin rejected the request: ret=PARAM NG"
+    }
+    zone_device.update_status.assert_awaited_once()
+    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TEMPERATURE] == 21
