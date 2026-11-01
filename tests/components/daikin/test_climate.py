@@ -38,6 +38,7 @@ from .conftest import (
     ZoneDevice,
     async_setup_daikin,
     configure_temperature_step,
+    temperature_step_record,
 )
 
 CLIMATE_ENTITY_ID = "climate.daikin_test"
@@ -93,6 +94,22 @@ async def test_target_temperature_step_without_status(
     await async_setup_daikin(hass, zone_device)
 
     assert _step(hass) == 1.0
+
+
+async def test_target_temperature_step_without_detection(
+    hass: HomeAssistant, zone_device: ZoneDevice, hass_storage: dict[str, Any]
+) -> None:
+    """Adapters that report a status but do not detect the step use whole degrees."""
+    configure_temperature_step(zone_device, "unknown", half_degree_adapter=False)
+    zone_device.detects_target_temperature_step = False
+    hass_storage[TEMPERATURE_STEP_STORAGE_KEY] = temperature_step_record("confirmed")
+    config_entry = await async_setup_daikin(hass, zone_device)
+
+    assert _step(hass) == 1.0
+    assert zone_device.target_temperature_step_status == "unknown"
+    assert TEMPERATURE_STEP_STORAGE_KEY not in hass_storage
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    assert result["step_id"] == "unavailable"
 
 
 async def test_whole_degree_device_shows_half_degree_target(

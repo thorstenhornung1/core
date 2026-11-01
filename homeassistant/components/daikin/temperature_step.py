@@ -29,7 +29,9 @@ WHOLE_DEGREE = 1.0
 
 
 def step_status(device: Appliance) -> str | None:
-    """Return the pydaikin step status, or None if the device has none."""
+    """Return the pydaikin step status, None if the device does not detect it."""
+    if getattr(device, "detects_target_temperature_step", None) is False:
+        return None
     status = getattr(device, "target_temperature_step_status", None)
     return status if status in STATUSES else None
 
