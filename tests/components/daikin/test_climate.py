@@ -1,14 +1,17 @@
 """Tests for the Daikin climate and switch entities."""
 
+from datetime import timedelta
 from typing import Any
 
+from freezegun.api import FrozenDateTimeFactory
 from pydaikin.exceptions import DaikinException
 import pytest
-from pytest_homeassistant.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 
 from homeassistant.components.climate import (
     ATTR_HVAC_MODE,
     ATTR_PRESET_MODE,
+    ATTR_TARGET_TEMP_STEP,
     DOMAIN as CLIMATE_DOMAIN,
     PRESET_AWAY,
     SERVICE_SET_HVAC_MODE,
@@ -48,6 +51,37 @@ async def _async_setup_daikin(
     await hass.async_block_till_done()
 
     return config_entry
+
+
+async def test_target_temperature_step_follows_device(
+    hass: HomeAssistant,
+    zone_device: ZoneDevice,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """The target temperature step follows the device after an update."""
+    zone_device.target_temperature_step = 0.5
+    await _async_setup_daikin(hass, zone_device)
+
+    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TARGET_TEMP_STEP] == 0.5
+
+    # pydaikin falls back to whole degrees after a rejected half-degree setpoint
+    zone_device.target_temperature_step = 1.0
+    freezer.tick(timedelta(seconds=120))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TARGET_TEMP_STEP] == 1
+
+
+async def test_target_temperature_step_without_library_support(
+    hass: HomeAssistant,
+    zone_device: ZoneDevice,
+) -> None:
+    """Whole degrees are used if pydaikin does not report a step."""
+    del zone_device.target_temperature_step
+    await _async_setup_daikin(hass, zone_device)
+
+    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TARGET_TEMP_STEP] == 1
 
 
 @pytest.mark.parametrize(

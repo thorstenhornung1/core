@@ -186,7 +186,6 @@ class DaikinClimate(DaikinEntity, ClimateEntity):
     _attr_name = None
     _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_hvac_modes = list(HA_STATE_TO_DAIKIN)
-    _attr_target_temperature_step = 1
     _attr_fan_modes: list[str]
     _attr_swing_modes: list[str]
 
@@ -261,6 +260,12 @@ class DaikinClimate(DaikinEntity, ClimateEntity):
     def native_target_temperature(self) -> float | None:
         """Return the temperature we try to reach."""
         return self.device.target_temperature
+
+    @property
+    @override
+    def target_temperature_step(self) -> float:
+        """Return the target temperature step supported by the device."""
+        return float(getattr(self.device, "target_temperature_step", 1))
 
     @override
     async def async_set_temperature(self, **kwargs: Any) -> None:
