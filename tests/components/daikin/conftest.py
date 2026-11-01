@@ -3,7 +3,7 @@
 from collections.abc import Callable, Generator
 import re
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 import urllib.parse
 
 import pytest
@@ -58,10 +58,19 @@ def configure_zone_device(
 def configure_temperature_step(
     device: ZoneDevice, status: str, *, half_degree_adapter: bool = True
 ) -> None:
-    """Report a pydaikin target temperature step status like a BRP069."""
+    """Report a target temperature step status and step like a BRP069.
+
+    As in pydaikin, the step follows the status: whole degrees once inferred,
+    and always on adapters without half degrees such as AirBase.
+    """
     device.target_temperature_step_status = status
-    device.target_temperature_step = (
-        0.5 if half_degree_adapter and status != "inferred" else 1.0
+    type(device).target_temperature_step = PropertyMock(
+        side_effect=lambda: (
+            0.5
+            if half_degree_adapter
+            and device.target_temperature_step_status != "inferred"
+            else 1.0
+        )
     )
 
 

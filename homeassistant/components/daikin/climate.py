@@ -266,7 +266,7 @@ class DaikinClimate(DaikinEntity, ClimateEntity):
     @property
     @override
     def target_temperature_step(self) -> float:
-        """Return half degrees only once the device confirmed them."""
+        """Return the temperature step supported by the device."""
         return control_step(self.device)
 
     @override

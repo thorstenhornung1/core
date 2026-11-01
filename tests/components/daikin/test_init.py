@@ -338,7 +338,7 @@ async def test_stored_temperature_step_discarded(
 
     assert config_entry.state is ConfigEntryState.LOADED
     assert zone_device.target_temperature_step_status == "unknown"
-    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TARGET_TEMP_STEP] == 1
+    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TARGET_TEMP_STEP] == 0.5
     assert TEMPERATURE_STEP_STORAGE_KEY not in hass_storage
 
 
@@ -408,12 +408,12 @@ async def test_existing_installation_without_record(
     hass_storage: dict[str, Any],
     issue_registry: ir.IssueRegistry,
 ) -> None:
-    """An entry from before this feature works unchanged with whole degrees."""
+    """An entry from before this feature gets half degrees without user action."""
     configure_temperature_step(zone_device, "unknown")
     config_entry = await async_setup_daikin(hass, zone_device)
 
     assert config_entry.state is ConfigEntryState.LOADED
-    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TARGET_TEMP_STEP] == 1
+    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TARGET_TEMP_STEP] == 0.5
     assert TEMPERATURE_STEP_STORAGE_KEY not in hass_storage
     assert not issue_registry.issues
     assert not hass.states.async_all("persistent_notification")
@@ -423,20 +423,20 @@ async def test_existing_installation_without_record(
 async def test_temperature_step_restored_after_reload(
     hass: HomeAssistant, zone_device: ZoneDevice, hass_storage: dict[str, Any]
 ) -> None:
-    """A reload starts with a fresh status and restores the stored one."""
-    configure_temperature_step(zone_device, "confirmed")
+    """After a reload a whole-degree device does not need a new fallback."""
+    configure_temperature_step(zone_device, "inferred")
     config_entry = await async_setup_daikin(hass, zone_device)
     await hass.async_block_till_done()
     # Stored by the first refresh
-    assert hass_storage[TEMPERATURE_STEP_STORAGE_KEY]["data"]["status"] == "confirmed"
+    assert hass_storage[TEMPERATURE_STEP_STORAGE_KEY]["data"]["status"] == "inferred"
 
-    # A new pydaikin device object starts unknown
+    # A new pydaikin device object starts unknown, i.e. with half degrees
     configure_temperature_step(zone_device, "unknown")
     assert await hass.config_entries.async_reload(config_entry.entry_id)
     await hass.async_block_till_done()
 
-    assert zone_device.target_temperature_step_status == "confirmed"
-    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TARGET_TEMP_STEP] == 0.5
+    assert zone_device.target_temperature_step_status == "inferred"
+    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TARGET_TEMP_STEP] == 1
     zone_device.set.assert_not_awaited()
 
 

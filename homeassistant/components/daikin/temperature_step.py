@@ -35,13 +35,14 @@ def step_status(device: Appliance) -> str | None:
 
 
 def control_step(device: Appliance) -> float:
-    """Return the step to offer: half degrees only once pydaikin confirmed them."""
-    if (
-        step_status(device) == STATUS_CONFIRMED
-        and device.target_temperature_step == HALF_DEGREE
-    ):
-        return HALF_DEGREE
-    return WHOLE_DEGREE
+    """Return the step pydaikin reports, whole degrees without step status.
+
+    BRP069/BRP072C adapters report half degrees until a rejected half degree
+    made pydaikin fall back to a whole degree.
+    """
+    if step_status(device) is None:
+        return WHOLE_DEGREE
+    return device.target_temperature_step
 
 
 def _storage_key(entry_id: str) -> str:

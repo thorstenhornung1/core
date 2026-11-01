@@ -48,7 +48,7 @@ def _step(hass: HomeAssistant) -> float:
 @pytest.mark.parametrize(
     ("status", "half_degree_adapter", "step"),
     [
-        pytest.param("unknown", True, 1.0, id="brp069-unknown"),
+        pytest.param("unknown", True, 0.5, id="brp069-unknown"),
         pytest.param("confirmed", True, 0.5, id="brp069-confirmed"),
         pytest.param("inferred", True, 1.0, id="brp069-inferred"),
         pytest.param("unknown", False, 1.0, id="airbase"),
@@ -62,7 +62,7 @@ async def test_target_temperature_step(
     half_degree_adapter: bool,
     step: float,
 ) -> None:
-    """Half degrees are offered only once pydaikin confirmed them."""
+    """The entity offers the step pydaikin reports for the adapter."""
     configure_temperature_step(
         zone_device, status, half_degree_adapter=half_degree_adapter
     )
@@ -82,11 +82,11 @@ async def test_target_temperature_step_without_status(
     assert _step(hass) == 1.0
 
 
-async def test_unverified_device_shows_half_degree_target(
+async def test_whole_degree_device_shows_half_degree_target(
     hass: HomeAssistant, zone_device: ZoneDevice
 ) -> None:
     """A half-degree setpoint is shown as is while whole degrees are offered."""
-    configure_temperature_step(zone_device, "unknown")
+    configure_temperature_step(zone_device, "inferred")
     zone_device.target_temperature = 22.5
     await async_setup_daikin(hass, zone_device)
 
@@ -115,7 +115,7 @@ async def test_zone_climate_keeps_whole_degree_step(
 async def test_confirmation_is_published_and_stored(
     hass: HomeAssistant, zone_device: ZoneDevice, hass_storage: dict[str, Any]
 ) -> None:
-    """An accepted half degree offers 0.5 without a reload and is stored."""
+    """An accepted half degree keeps 0.5 and is stored."""
     configure_temperature_step(zone_device, "unknown")
 
     async def _set(values: dict[str, Any]) -> None:
@@ -125,7 +125,7 @@ async def test_confirmation_is_published_and_stored(
 
     zone_device.set = AsyncMock(side_effect=_set)
     config_entry = await async_setup_daikin(hass, zone_device)
-    assert _step(hass) == 1.0
+    assert _step(hass) == 0.5
 
     await _async_set_temperature(hass, 22.5)
 
@@ -179,7 +179,7 @@ async def test_failed_write_changes_nothing(
     zone_device.set.assert_awaited_once()
     state = hass.states.get(CLIMATE_ENTITY_ID)
     assert state.attributes[ATTR_TEMPERATURE] == 22
-    assert state.attributes[ATTR_TARGET_TEMP_STEP] == 1.0
+    assert state.attributes[ATTR_TARGET_TEMP_STEP] == 0.5
     assert TEMPERATURE_STEP_STORAGE_KEY not in hass_storage
 
 
@@ -212,12 +212,12 @@ async def test_status_change_on_poll(
     configure_temperature_step(zone_device, "unknown")
     await async_setup_daikin(hass, zone_device)
 
-    configure_temperature_step(zone_device, "confirmed")
+    configure_temperature_step(zone_device, "inferred")
     freezer.tick(timedelta(seconds=120))
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
 
-    assert _step(hass) == 0.5
+    assert _step(hass) == 1.0
     stored = hass_storage[TEMPERATURE_STEP_STORAGE_KEY]
     hass_storage[TEMPERATURE_STEP_STORAGE_KEY] = {**stored, "marker": True}
 

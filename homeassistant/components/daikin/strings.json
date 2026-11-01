@@ -93,7 +93,7 @@
   "options": {
     "abort": {
       "not_loaded": "The Daikin device is not available right now. Try again once the integration has loaded.",
-      "reset_successful": "Home Assistant has forgotten the detected temperature precision and uses 1 °C controls until device support is verified again."
+      "reset_successful": "Home Assistant has forgotten the detected temperature precision and detects it again with the next half-degree temperature."
     },
     "step": {
       "half_degree": {
@@ -104,11 +104,11 @@
         "title": "Temperature precision"
       },
       "not_verified": {
-        "description": "**Status:** Not yet verified\n**Available control step:** 1 °C\n\nThe device remains fully usable. Half-degree controls become available once the device has accepted a half-degree temperature, for example one set by an automation.",
+        "description": "**Status:** Not yet verified\n**Available control step:** 0.5 °C\n\nHome Assistant checks the precision with the first half-degree temperature you set. If the device does not accept it, the next whole degree is set instead and Home Assistant switches to 1 °C controls.",
         "title": "Temperature precision"
       },
       "reset": {
-        "description": "Home Assistant will forget the previously detected resolution and use 1 °C controls until device support is verified again. This does not change the air conditioner's current settings.",
+        "description": "Home Assistant will forget the previously detected resolution and offer 0.5 °C controls again until the next half-degree temperature shows what the device supports. This does not change the air conditioner's current settings.",
         "title": "Reset temperature precision detection?"
       },
       "unavailable": {

@@ -102,9 +102,9 @@ async def test_reset_learned_precision(
 ) -> None:
     """Reset asks for confirmation, then forgets the precision locally."""
     configure_temperature_step(zone_device, "unknown")
-    hass_storage[TEMPERATURE_STEP_STORAGE_KEY] = temperature_step_record("confirmed")
+    hass_storage[TEMPERATURE_STEP_STORAGE_KEY] = temperature_step_record("inferred")
     config_entry = await async_setup_daikin(hass, zone_device)
-    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TARGET_TEMP_STEP] == 0.5
+    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TARGET_TEMP_STEP] == 1
 
     result = await hass.config_entries.options.async_init(config_entry.entry_id)
     result = await hass.config_entries.options.async_configure(
@@ -114,7 +114,7 @@ async def test_reset_learned_precision(
     # Nothing is changed before the confirmation
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "reset"
-    assert zone_device.target_temperature_step_status == "confirmed"
+    assert zone_device.target_temperature_step_status == "inferred"
     assert TEMPERATURE_STEP_STORAGE_KEY in hass_storage
 
     result = await hass.config_entries.options.async_configure(result["flow_id"], {})
@@ -124,7 +124,7 @@ async def test_reset_learned_precision(
     assert result["reason"] == "reset_successful"
     assert zone_device.target_temperature_step_status == "unknown"
     assert TEMPERATURE_STEP_STORAGE_KEY not in hass_storage
-    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TARGET_TEMP_STEP] == 1
+    assert hass.states.get(CLIMATE_ENTITY_ID).attributes[ATTR_TARGET_TEMP_STEP] == 0.5
     _assert_no_device_command(zone_device)
 
     # Learning works again after a reset
