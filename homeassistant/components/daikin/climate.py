@@ -242,8 +242,7 @@ class DaikinClimate(DaikinEntity, ClimateEntity):
                     _LOGGER.error("Invalid temperature %s", value)
 
         if values:
-            await self.device.set(values)
-            await self.coordinator.async_refresh()
+            await self._async_send_command(self.device.set(values))
 
     @property
     @override
@@ -339,6 +338,10 @@ class DaikinClimate(DaikinEntity, ClimateEntity):
     @override
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set preset mode."""
+        await self._async_send_command(self._async_set_preset_mode(preset_mode))
+
+    async def _async_set_preset_mode(self, preset_mode: str) -> None:
+        """Send the preset mode to the device."""
         if preset_mode == PRESET_AWAY:
             await self.device.set_holiday(ATTR_STATE_ON)
         elif preset_mode == PRESET_BOOST:
@@ -359,7 +362,6 @@ class DaikinClimate(DaikinEntity, ClimateEntity):
             await self.device.set_advanced_mode(
                 HA_PRESET_TO_DAIKIN[PRESET_ECO], ATTR_STATE_OFF
             )
-        await self.coordinator.async_refresh()
 
     @property
     @override
@@ -375,16 +377,16 @@ class DaikinClimate(DaikinEntity, ClimateEntity):
     @override
     async def async_turn_on(self) -> None:
         """Turn device on."""
-        await self.device.set({})
-        await self.coordinator.async_refresh()
+        await self._async_send_command(self.device.set({}))
 
     @override
     async def async_turn_off(self) -> None:
         """Turn device off."""
-        await self.device.set(
-            {HA_ATTR_TO_DAIKIN[ATTR_HVAC_MODE]: HA_STATE_TO_DAIKIN[HVACMode.OFF]}
+        await self._async_send_command(
+            self.device.set(
+                {HA_ATTR_TO_DAIKIN[ATTR_HVAC_MODE]: HA_STATE_TO_DAIKIN[HVACMode.OFF]}
+            )
         )
-        await self.coordinator.async_refresh()
 
 
 class DaikinZoneClimate(DaikinEntity, ClimateEntity):
@@ -533,14 +535,16 @@ class DaikinZoneClimate(DaikinEntity, ClimateEntity):
     @override
     async def async_turn_on(self) -> None:
         """Turn the zone on."""
-        await self.device.set_zone(self._zone_id, "zone_onoff", "1")
-        await self.coordinator.async_refresh()
+        await self._async_send_command(
+            self.device.set_zone(self._zone_id, "zone_onoff", "1")
+        )
 
     @override
     async def async_turn_off(self) -> None:
         """Turn the zone off."""
-        await self.device.set_zone(self._zone_id, "zone_onoff", "0")
-        await self.coordinator.async_refresh()
+        await self._async_send_command(
+            self.device.set_zone(self._zone_id, "zone_onoff", "0")
+        )
 
     @override
     async def async_toggle(self) -> None:
