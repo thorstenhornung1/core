@@ -59,6 +59,9 @@
     }
   },
   "exceptions": {
+    "command_failed": {
+      "message": "Error sending command to Daikin device: {error}"
+    },
     "demand_control_invalid_device": {
       "message": "No Daikin config entry found for the given device."
     },
