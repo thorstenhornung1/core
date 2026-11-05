@@ -30,6 +30,11 @@ from homeassistant.util.ssl import client_context_no_verify
 from .const import DOMAIN, KEY_MAC, TIMEOUT_SEC
 from .coordinator import DaikinConfigEntry, DaikinCoordinator
 from .services import async_setup_services
+from .temperature_step import (
+    DaikinTemperatureStep,
+    async_remove_step_store,
+    supports_step_learning,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -78,9 +83,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: DaikinConfigEntry) -> No
         _LOGGER.debug("DaikinException from %s: %s", host, err)
         raise ConfigEntryNotReady from err
 
-    coordinator = DaikinCoordinator(hass, entry, device)
+    step = DaikinTemperatureStep(hass, entry, device) if supports_step_learning(device) else None
+    if step is not None:
+        await step.async_restore()
+
+    coordinator = DaikinCoordinator(hass, entry, device, step)
+    if step is not None:
+        step.bind_coordinator(coordinator)
 
     await coordinator.async_config_entry_first_refresh()
+    if step is not None:
+        await step.async_check_identity()
+        step.watch_identity()
 
     await async_migrate_unique_id(hass, entry, device)
 
@@ -91,6 +105,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: DaikinConfigEntry) -> No
 async def async_unload_entry(hass: HomeAssistant, entry: DaikinConfigEntry) -> None:
     """Unload a config entry."""
     await hass.config_entries.async_unload_platforms_or_raise(entry, PLATFORMS)
+    if (step := entry.runtime_data.temperature_step) is not None:
+        await step.async_close()
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: DaikinConfigEntry) -> None:
+    """Remove saved target temperature step state with the entry."""
+    await async_remove_step_store(hass, entry)
 
 
 async def async_migrate_unique_id(
