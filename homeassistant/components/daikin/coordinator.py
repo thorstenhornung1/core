@@ -50,3 +50,6 @@ class DaikinCoordinator(DataUpdateCoordinator[None]):
                 translation_key="error_communicating",
                 translation_placeholders={"error": str(err)},
             ) from err
+        if self.temperature_step is not None:
+            # Retries a learned step whose save failed, no I/O otherwise
+            await self.temperature_step.async_retry()

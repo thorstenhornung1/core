@@ -197,23 +197,7 @@ class DaikinOptionsFlow(OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Show current detection before offering reset."""
-        if isinstance(step := self._learned_step(), str):
-            return self.async_abort(reason=step)
-
-        if user_input is not None:
-            return await self.async_step_confirm_reset()
-
-        return self.async_show_form(
-            step_id="init",
-            data_schema=probatio.Schema({}),
-            description_placeholders={"step": str(step.device.target_temperature_step)},
-        )
-
-    async def async_step_confirm_reset(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Confirm and perform a storage-first, device-free reset."""
+        """Show the learned step; submitting resets it without device I/O."""
         if isinstance(step := self._learned_step(), str):
             return self.async_abort(reason=step)
 
@@ -224,10 +208,16 @@ class DaikinOptionsFlow(OptionsFlow):
             except DaikinStepResetError:
                 errors["base"] = "reset_failed"
             else:
+                self.config_entry.runtime_data.async_update_listeners()
                 return self.async_abort(reason="reset_successful")
 
         return self.async_show_form(
-            step_id="confirm_reset",
+            step_id="init",
             data_schema=probatio.Schema({}),
+            description_placeholders={
+                "step": str(
+                    self.config_entry.runtime_data.device.target_temperature_step
+                )
+            },
             errors=errors,
         )

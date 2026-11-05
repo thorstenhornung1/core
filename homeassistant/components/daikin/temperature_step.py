@@ -1,319 +1,236 @@
-"""Persist learned Daikin target temperature step between Home Assistant restarts."""
+"""Keep the target temperature step pydaikin learns across restarts.
+
+pydaikin learns whether a BRP069-family adapter accepts half degrees and
+keeps the result in memory. This module stores it per config entry and
+restores it on setup when the adapter reports the same MAC address and
+firmware. They are a plausibility check, not an authenticated device
+identity.
+"""
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime
 import logging
 import re
-from typing import TYPE_CHECKING, Any, TypeGuard
+from typing import Any, TypedDict, TypeGuard
 
 from pydaikin.daikin_base import Appliance
 from pydaikin.daikin_brp069 import DaikinBRP069
 
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.storage import Store
 
-if TYPE_CHECKING:
-    from .coordinator import DaikinCoordinator
-
 _LOGGER = logging.getLogger(__name__)
-_IDENTITY_FIELDS = ("device_mac", "model", "firmware_version")
-_LEARNED_STATUSES = ("confirmed", "inferred")
+
+STORAGE_VERSION = 1
+LEARNED_STATUSES = ("confirmed", "inferred")
+_MAX_IDENTIFIER_LENGTH = 128
+_MAC = re.compile(r"[0-9a-fA-F]{12}")
+
+
+class StepRecord(TypedDict):
+    """A learned step and the device it was learned from."""
+
+    status: str
+    device_mac: str
+    firmware_version: str
 
 
 class DaikinStepResetError(Exception):
-    """Unable to remove the persisted temperature step."""
+    """The stored temperature step could not be removed."""
 
 
 def supports_step_learning(device: Appliance) -> TypeGuard[DaikinBRP069]:
-    """Narrow to half-degree learning BRP069-family devices, excluding AirBase."""
+    """Return True for adapters whose step pydaikin learns.
+
+    AirBase inherits the status property from BRP069 but has a fixed
+    whole-degree step, so the class default of 0.5 tells them apart.
+    """
     return (
         isinstance(device, DaikinBRP069) and type(device).TARGET_TEMPERATURE_STEP == 0.5
     )
 
 
-def _valid_mac(value: Any) -> str | None:
-    """Return an actual MAC address, not Appliance.mac's IP fallback."""
+def _create_store(hass: HomeAssistant, entry_id: str) -> Store[StepRecord]:
+    return Store(
+        hass,
+        STORAGE_VERSION,
+        f"daikin.{entry_id}.temperature_step",
+        private=True,
+        atomic_writes=True,
+    )
+
+
+def _mac(value: Any) -> str | None:
+    """Return a real MAC address (Appliance.mac falls back to the IP)."""
     if not isinstance(value, str):
         return None
-    cleaned = re.sub(r"[:-]", "", value)
-    if len(cleaned) != 12 or re.fullmatch(r"[0-9a-fA-F]{12}", cleaned) is None:
+    cleaned = value.replace(":", "").replace("-", "")
+    return format_mac(cleaned) if _MAC.fullmatch(cleaned) else None
+
+
+def _firmware(value: Any) -> str | None:
+    """Return a printable firmware version of bounded length."""
+    if not isinstance(value, str):
         return None
-    return format_mac(cleaned)
+    value = value.strip()
+    if not value or len(value) > _MAX_IDENTIFIER_LENGTH or not value.isprintable():
+        return None
+    return value
 
 
-def _text_or_none(value: Any) -> str | None:
-    """Discard missing or non-text device identifiers."""
-    return value.strip() or None if isinstance(value, str) else None
+def _identity(device: Appliance) -> tuple[str, str] | None:
+    """Return MAC address and firmware, or None if either is unknown."""
+    mac = _mac(device.values.get("mac"))
+    firmware = _firmware(device.values.get("ver"))
+    if mac is None or firmware is None:
+        return None
+    return mac, firmware
+
+
+def _is_record(data: Any) -> TypeGuard[StepRecord]:
+    return (
+        isinstance(data, dict)
+        and data.get("status") in LEARNED_STATUSES
+        and all(
+            isinstance(data.get(key), str) for key in ("device_mac", "firmware_version")
+        )
+    )
 
 
 class DaikinTemperatureStep:
-    """Store pydaikin's learning status; never infer device capabilities in HA."""
+    """Store and restore the learned step of one config entry."""
 
     def __init__(
-        self, hass: HomeAssistant, entry: ConfigEntry, device: DaikinBRP069
+        self, hass: HomeAssistant, entry_id: str, device: DaikinBRP069
     ) -> None:
-        """Initialize one per-config-entry persistence adapter."""
-        self.hass = hass
-        self.entry = entry
-        self.device = device
-        self.store = Store[dict[str, Any]](
-            hass,
-            1,
-            f"daikin.{entry.entry_id}.temperature_step",
-            atomic_writes=True,
-        )
-        self.lock = asyncio.Lock()
-        self.closed = False
-        self._record: dict[str, Any] | None = None
-        self._coordinator: DaikinCoordinator | None = None
-        self._unsub_identity: Callable[[], None] | None = None
-        self._identity_task: asyncio.Task[None] | None = None
+        """Initialize the store for a learning adapter."""
+        self._hass = hass
+        self._device = device
+        self._store = _create_store(hass, entry_id)
+        # Serializes device commands with saving and resetting the step
+        self._lock = asyncio.Lock()
+        self._closed = False
+        # The record to keep, and the one verified in storage
+        self._desired: StepRecord | None = None
+        self._persisted: StepRecord | None = None
 
     @property
     def status(self) -> str:
-        """Return the current status reported by pydaikin."""
-        return self.device.target_temperature_step_status
-
-    def _identity(self) -> dict[str, str | None]:
-        """Read real identity fields, without Appliance.mac's IP fallback."""
-        values = self.device.values
-        return {
-            "device_mac": _valid_mac(values.get("mac")),
-            "model": _text_or_none(values.get("model")),
-            "firmware_version": _text_or_none(values.get("ver")),
-        }
-
-    def _current_identity_complete(self) -> bool:
-        """Tell whether this appliance currently exposes the full fingerprint."""
-        return all(value is not None for value in self._identity().values())
-
-    def _identity_changes(self) -> tuple[bool, dict[str, str]]:
-        """Return mismatch and newly known fields in the current record."""
-        if self._record is None:
-            return False, {}
-        current = self._identity()
-        mismatch = any(
-            self._record.get(key) is not None
-            and value is not None
-            and self._record[key] != value
-            for key, value in current.items()
-        )
-        additions = {
-            key: value
-            for key, value in current.items()
-            if self._record.get(key) is None and value is not None
-        }
-        return mismatch, additions
+        """Return the step status reported by pydaikin."""
+        return self._device.target_temperature_step_status
 
     async def async_restore(self) -> None:
-        """Restore learned status before the first coordinator refresh."""
+        """Restore the stored step if it belongs to this device.
+
+        Runs once on setup, before the first refresh, while the identity
+        pydaikin just read is fresh. pydaikin caches that identity for the
+        lifetime of the device object, so it is not checked again later.
+        """
         try:
-            data = await self.store.async_load()
+            record = await self._store.async_load()
         except (HomeAssistantError, OSError) as err:
-            _LOGGER.warning("Unable to load Daikin step detection: %s", err)
+            _LOGGER.warning("Could not load the Daikin temperature step: %s", err)
             return
-
-        if not isinstance(data, dict) or data.get("status") not in _LEARNED_STATUSES:
+        if record is None:
             return
-
-        self._record = data
-        mismatch, _ = self._identity_changes()
-        if mismatch:
-            await self._async_invalidate_unlocked()
+        identity = _identity(self._device)
+        if identity is None:
+            _LOGGER.debug("Daikin identity incomplete, not restoring the step")
             return
-
-        try:
-            self.device.target_temperature_step_status = data["status"]
-        except ValueError:
-            _LOGGER.warning("Ignoring invalid saved Daikin step detection")
-            self._record = None
-
-    def bind_coordinator(self, coordinator: DaikinCoordinator) -> None:
-        """Link updates after setup without exposing persistence to pydaikin."""
-        self._coordinator = coordinator
-        self.entry.async_on_unload(self._stop_watching)
-
-    async def async_check_identity(self) -> None:
-        """Validate a restored fingerprint and learn metadata as it arrives."""
-        async with self.lock:
-            if self.closed or self._record is None:
-                return
-            mismatch, additions = self._identity_changes()
-            if mismatch:
-                await self._async_invalidate_locked()
-            elif additions:
-                record = {**self._record, **additions}
-                await self._async_save_locked(record)
-            still_mismatched = self._record is not None and self._identity_changes()[0]
-            if self._record is None or (
-                not still_mismatched
-                and self._current_identity_complete()
-                and all(
-                    self._record.get(field) is not None for field in _IDENTITY_FIELDS
-                )
-            ):
-                self._stop_watching()
-
-    async def _async_invalidate_unlocked(self) -> None:
-        """Invalidate an old fingerprint during startup, without a lock."""
-        await self._async_remove_for_invalidation()
-        self.device.target_temperature_step_status = "unknown"
-
-    async def _async_invalidate_locked(self) -> None:
-        """Invalidate a mismatched fingerprint and update any active entity."""
-        await self._async_invalidate_unlocked()
-        if self._coordinator is not None:
-            self._coordinator.async_update_listeners()
-
-    async def _async_remove_for_invalidation(self) -> None:
-        """Remove a stale record without interrupting device operations."""
-        try:
-            await self.store.async_remove()
-        except OSError as err:
-            _LOGGER.warning("Unable to remove outdated Daikin step detection: %s", err)
-            # Keep the fingerprint to retry its invalidation on a later update.
+        if (
+            not _is_record(record)
+            or (
+                record["device_mac"],
+                record["firmware_version"],
+            )
+            != identity
+        ):
+            _LOGGER.info("Discarding the Daikin temperature step of another device")
+            await self._async_remove_stale()
             return
-        _LOGGER.info("Discarding Daikin step detection after device identity change")
-        self._record = None
+        self._device.target_temperature_step_status = record["status"]
+        self._desired = self._persisted = record
 
-    async def _async_save_locked(self, record: dict[str, Any]) -> None:
-        """Submit a learned result to HA's store, isolating write failures."""
-        try:
-            await self.store.async_save(record)
-        except (HomeAssistantError, OSError) as err:
-            # Keep the old record so the next device transaction retries
-            _LOGGER.warning("Unable to save Daikin step detection: %s", err)
-            return
-        # Store logs disk errors (WriteError) itself without raising
-        self._record = record
+    async def async_set(self, settings: dict[str, Any]) -> None:
+        """Send settings to the device, then store a newly learned step.
 
-    async def _async_save_if_changed_locked(self) -> None:
-        """Save a newly learned state immediately after the device transaction."""
-        status = self.status
-        if status not in _LEARNED_STATUSES:
-            return
-        identity = self._identity()
-        record = {
-            "status": status,
-            **identity,
-            "learned_at": datetime.now(UTC).isoformat(),
-        }
-        if self._record is not None:
-            mismatch, additions = self._identity_changes()
-            if mismatch:
-                # The old record belongs to another device; this result was
-                # just learned from the current one, so it replaces the record
-                _LOGGER.info("Replacing Daikin step detection of a previous device")
-                await self._async_save_locked(record)
-                self.watch_identity()
-                return
-            if self._record.get("status") == status:
-                # Missing identity fields may become available after learning.
-                if not additions:
-                    return
-                record = {**self._record, **additions}
-            else:
-                for key in _IDENTITY_FIELDS:
-                    if record[key] is None:
-                        record[key] = self._record.get(key)
-        await self._async_save_locked(record)
-        self.watch_identity()
-
-    @asynccontextmanager
-    async def async_set_context(self) -> AsyncIterator[None]:
-        """Serialize a device write, step persistence, and manual reset."""
-        async with self.lock:
-            if self.closed:
-                raise HomeAssistantError("Daikin config entry is unloading")
+        A storage failure never fails the command; the save is retried with
+        the next coordinator update.
+        """
+        async with self._lock:
             try:
-                yield
+                await self._device.set(settings)
             finally:
-                await self._async_save_if_changed_locked()
+                self._take_learned_status()
+                await self._async_persist()
+
+    async def async_retry(self) -> None:
+        """Retry a pending save, without I/O when nothing is pending."""
+        if self._desired == self._persisted:
+            return
+        async with self._lock:
+            await self._async_persist()
 
     async def async_reset(self) -> None:
-        """Reset only after a confirmed storage deletion; never contact device."""
-        async with self.lock:
-            if self.closed:
-                raise DaikinStepResetError("Daikin config entry is unloading")
+        """Forget the learned step without contacting the device."""
+        async with self._lock:
             try:
-                await self.store.async_remove()
+                await self._store.async_remove()
             except OSError as err:
-                _LOGGER.warning("Unable to reset Daikin step detection: %s", err)
-                raise DaikinStepResetError from err
-            self._record = None
-            self.device.target_temperature_step_status = "unknown"
-            self._stop_watching()
-            if self._coordinator is not None:
-                self._coordinator.async_update_listeners()
-
-    @callback
-    def watch_identity(self) -> None:
-        """Track missing metadata until it is available, without device I/O."""
-        if (
-            self.closed
-            or self._record is None
-            or self._coordinator is None
-            or self._unsub_identity is not None
-            or (
-                not self._identity_changes()[0]
-                and self._current_identity_complete()
-                and all(self._record.get(key) is not None for key in _IDENTITY_FIELDS)
-            )
-        ):
-            return
-        self._unsub_identity = self._coordinator.async_add_listener(
-            self._identity_updated
-        )
-
-    @callback
-    def _identity_updated(self) -> None:
-        """Schedule at most one background operation when fingerprint changes."""
-        if self.closed or self._record is None:
-            self._stop_watching()
-            return
-        if self._identity_task is not None and not self._identity_task.done():
-            return
-        mismatch, additions = self._identity_changes()
-        if not mismatch and not additions:
-            if self._current_identity_complete():
-                self._stop_watching()
-            return
-        self._identity_task = self.entry.async_create_background_task(
-            self.hass,
-            self.async_check_identity(),
-            "daikin temperature step identity",
-        )
-
-    @callback
-    def _stop_watching(self) -> None:
-        """Unregister the metadata watcher, also on HA config entry unload."""
-        if self._unsub_identity is not None:
-            self._unsub_identity()
-            self._unsub_identity = None
+                raise DaikinStepResetError(str(err)) from err
+            self._desired = self._persisted = None
+            self._device.target_temperature_step_status = "unknown"
 
     async def async_close(self) -> None:
-        """Drain command writes and stop all metadata work before unloading."""
-        self._stop_watching()
-        task = self._identity_task
-        if task is not None and not task.done():
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-        async with self.lock:
-            self.closed = True
+        """Wait for a running command and stop saving."""
+        async with self._lock:
+            self._closed = True
+
+    def _take_learned_status(self) -> None:
+        status = self.status
+        if status not in LEARNED_STATUSES or (
+            self._desired is not None and self._desired["status"] == status
+        ):
+            return
+        if (identity := _identity(self._device)) is None:
+            _LOGGER.debug("Daikin identity incomplete, not storing the step")
+            return
+        self._desired = {
+            "status": status,
+            "device_mac": identity[0],
+            "firmware_version": identity[1],
+        }
+
+    async def _async_persist(self) -> None:
+        if self._closed or self._desired is None or self._desired == self._persisted:
+            return
+        desired = self._desired
+        try:
+            await self._store.async_save(desired)
+            if self._hass.state is CoreState.stopping:
+                # Only queued for the final write, so it cannot be verified
+                return
+            # Store logs write errors itself, so read the record back
+            stored = await self._store.async_load()
+        except (HomeAssistantError, OSError) as err:
+            _LOGGER.warning("Could not save the Daikin temperature step: %s", err)
+            return
+        if stored == desired:
+            self._persisted = desired
+        else:
+            _LOGGER.debug("Daikin temperature step not saved, retrying later")
+
+    async def _async_remove_stale(self) -> None:
+        try:
+            await self._store.async_remove()
+        except OSError as err:
+            _LOGGER.warning("Could not remove the Daikin temperature step: %s", err)
 
 
-async def async_remove_step_store(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Remove persisted step state even if config entry setup previously failed."""
-    store = Store[dict[str, Any]](
-        hass, 1, f"daikin.{entry.entry_id}.temperature_step", atomic_writes=True
-    )
+async def async_remove_temperature_step(hass: HomeAssistant, entry_id: str) -> None:
+    """Remove the stored step of a removed config entry."""
     try:
-        await store.async_remove()
+        await _create_store(hass, entry_id).async_remove()
     except OSError as err:
-        _LOGGER.warning("Unable to remove Daikin step storage: %s", err)
+        _LOGGER.warning("Could not remove the Daikin temperature step: %s", err)

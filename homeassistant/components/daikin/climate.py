@@ -242,8 +242,7 @@ class DaikinClimate(DaikinEntity, ClimateEntity):
 
         if values:
             if (step := self.coordinator.temperature_step) is not None:
-                async with step.async_set_context():
-                    await self.device.set(values)
+                await step.async_set(values)
             else:
                 await self.device.set(values)
             await self.coordinator.async_refresh()

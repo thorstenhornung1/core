@@ -1,481 +1,320 @@
-"""Tests for Daikin target temperature step persistence."""
+"""Tests for storing the Daikin target temperature step."""
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from pydaikin.daikin_airbase import DaikinAirBase
 from pydaikin.daikin_brp069 import DaikinBRP069
 import pytest
-from pytest_homeassistant.common import MockConfigEntry
 
-from homeassistant.components.daikin.const import DOMAIN
 from homeassistant.components.daikin.temperature_step import (
     DaikinStepResetError,
     DaikinTemperatureStep,
-    _valid_mac,
-    async_remove_step_store,
+    async_remove_temperature_step,
     supports_step_learning,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.storage import Store
+from homeassistant.util.file import WriteError
+
+ENTRY_ID = "entry"
+KEY = f"daikin.{ENTRY_ID}.temperature_step"
+RECORD = {
+    "status": "inferred",
+    "device_mac": "aa:bb:cc:dd:ee:ff",
+    "firmware_version": "1_0_0",
+}
 
 
-def make_device(*, firmware: str | None = "1_0_0") -> DaikinBRP069:
-    """Build a real pydaikin appliance without network communication."""
+def make_device(**values: Any) -> DaikinBRP069:
+    """Build a real pydaikin appliance whose set() learns a status."""
     device = DaikinBRP069("192.0.2.12", session=MagicMock())
-    device.values.update({"mac": "aabbccddeeff", "model": "TEST"})
-    if firmware is not None:
-        device.values["ver"] = firmware
+    device.values.update({"mac": "aabbccddeeff", "ver": "1_0_0", **values})
     return device
 
 
-def test_mac_validation() -> None:
-    """Normalize a real MAC but never accept IPs or missing values."""
-    assert _valid_mac(None) is None
-    assert _valid_mac("192.0.2.12") is None
-    assert _valid_mac("zz:bb:cc:dd:ee:ff") is None
-    assert _valid_mac("AA-BB-CC-DD-EE-FF") == "aa:bb:cc:dd:ee:ff"
+def learns(device: DaikinBRP069, status: str) -> None:
+    """Let the next device.set() end with the given pydaikin status."""
+
+    async def _set(settings: dict[str, Any]) -> None:
+        device.target_temperature_step_status = status
+
+    device.set = AsyncMock(side_effect=_set)
 
 
-def test_airbase_does_not_learn_step() -> None:
+def store_record(hass_storage: dict[str, Any], data: Any) -> None:
+    """Put a stored step into Home Assistant's mocked storage."""
+    hass_storage[KEY] = {"version": 1, "minor_version": 1, "key": KEY, "data": data}
+
+
+def stored(hass_storage: dict[str, Any]) -> Any:
+    """Return the stored step, None if there is none."""
+    return hass_storage.get(KEY, {}).get("data")
+
+
+def test_only_half_degree_adapters_learn() -> None:
     """AirBase inherits the status property but has a fixed whole-degree step."""
-    brp = make_device()
     airbase = DaikinAirBase("192.0.2.13", session=MagicMock())
-    assert supports_step_learning(brp)
+    assert supports_step_learning(make_device())
     assert hasattr(airbase, "target_temperature_step_status")
     assert not supports_step_learning(airbase)
-    assert airbase.target_temperature_step == 1.0
 
 
-async def test_save_and_restore(hass: HomeAssistant) -> None:
-    """Learned whole-degree fallback persists across fresh appliance instances."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
+async def test_learned_step_survives_a_new_device_object(
+    hass: HomeAssistant, hass_storage: dict[str, Any]
+) -> None:
+    """A learned step is stored and restored into the next pydaikin object."""
     device = make_device()
-    step = DaikinTemperatureStep(hass, entry, device)
+    step = DaikinTemperatureStep(hass, ENTRY_ID, device)
+    learns(device, "inferred")
+    await step.async_set({"stemp": "22.5"})
+    assert stored(hass_storage) == RECORD
 
-    async with step.async_set_context():
-        device.target_temperature_step_status = "inferred"
-
-    record = await step.store.async_load()
-    assert record["status"] == "inferred"
-    assert record["device_mac"] == "aa:bb:cc:dd:ee:ff"
-    assert record["firmware_version"] == "1_0_0"
-    assert record["learned_at"]
-
-    fresh_device = make_device()
-    fresh_step = DaikinTemperatureStep(hass, entry, fresh_device)
-    await fresh_step.async_restore()
-    assert fresh_step.status == "inferred"
-    assert fresh_device.target_temperature_step == 1.0
-
-    async with fresh_step.async_set_context():
-        fresh_device.target_temperature_step_status = "confirmed"
-    assert (await fresh_step.store.async_load())["status"] == "confirmed"
-    assert fresh_device.target_temperature_step == 0.5
+    fresh = make_device()
+    await DaikinTemperatureStep(hass, ENTRY_ID, fresh).async_restore()
+    assert fresh.target_temperature_step_status == "inferred"
+    assert fresh.target_temperature_step == 1.0
 
 
-async def test_reset_removes_store(hass: HomeAssistant) -> None:
-    """A successful reset changes memory only after storage deletion."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
+async def test_inferred_to_confirmed_is_stored(
+    hass: HomeAssistant, hass_storage: dict[str, Any]
+) -> None:
+    """A later confirmed half degree replaces a learned whole degree."""
+    store_record(hass_storage, RECORD)
     device = make_device()
-    step = DaikinTemperatureStep(hass, entry, device)
-    async with step.async_set_context():
-        device.target_temperature_step_status = "inferred"
+    step = DaikinTemperatureStep(hass, ENTRY_ID, device)
+    await step.async_restore()
 
-    await step.async_reset()
+    learns(device, "confirmed")
+    await step.async_set({"stemp": "22.5"})
+    assert stored(hass_storage)["status"] == "confirmed"
+
+
+async def test_unchanged_status_writes_nothing(
+    hass: HomeAssistant, hass_storage: dict[str, Any]
+) -> None:
+    """Commands that learn nothing new cause no storage I/O."""
+    store_record(hass_storage, RECORD)
+    device = make_device()
+    step = DaikinTemperatureStep(hass, ENTRY_ID, device)
+    await step.async_restore()
+    learns(device, "inferred")
+
+    with patch.object(Store, "async_save") as save:
+        await step.async_set({"f_rate": "auto"})
+        await step.async_retry()
+    save.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {**RECORD, "firmware_version": "2_0_0"},
+        {**RECORD, "device_mac": "11:22:33:44:55:66"},
+        {**RECORD, "status": "unknown"},
+        {**RECORD, "firmware_version": None},
+        {"status": "inferred"},
+        ["inferred"],
+    ],
+    ids=["firmware", "mac", "status", "type", "fields", "list"],
+)
+async def test_other_or_invalid_record_is_discarded(
+    hass: HomeAssistant, hass_storage: dict[str, Any], data: Any
+) -> None:
+    """A record of another device or with an invalid schema is not restored."""
+    store_record(hass_storage, data)
+    device = make_device()
+    await DaikinTemperatureStep(hass, ENTRY_ID, device).async_restore()
+
     assert device.target_temperature_step_status == "unknown"
-    assert await step.store.async_load() is None
-    assert device.target_temperature_step == 0.5
+    assert stored(hass_storage) is None
 
 
-async def test_failed_reset_preserves_status(hass: HomeAssistant) -> None:
-    """A failed explicit reset must never report success."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"ver": None},
+        {"mac": None},
+        {"mac": "192.0.2.12"},
+        {"ver": "x" * 129},
+        {"ver": "1_0\x00"},
+    ],
+    ids=["no-firmware", "no-mac", "ip-as-mac", "too-long", "control-char"],
+)
+async def test_incomplete_identity_neither_restores_nor_stores(
+    hass: HomeAssistant, hass_storage: dict[str, Any], values: dict[str, Any]
+) -> None:
+    """Without a reliable fingerprint nothing is restored or stored."""
+    store_record(hass_storage, RECORD)
+    device = make_device(**values)
+    step = DaikinTemperatureStep(hass, ENTRY_ID, device)
+    await step.async_restore()
+    assert device.target_temperature_step_status == "unknown"
+    assert stored(hass_storage) == RECORD
+
+    learns(device, "confirmed")
+    await step.async_set({"stemp": "22.5"})
+    assert stored(hass_storage) == RECORD
+
+
+async def test_load_error_starts_unknown(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unreadable store is logged and the device keeps its own status."""
     device = make_device()
-    step = DaikinTemperatureStep(hass, entry, device)
-    async with step.async_set_context():
-        device.target_temperature_step_status = "inferred"
+    step = DaikinTemperatureStep(hass, ENTRY_ID, device)
+    with patch.object(Store, "async_load", side_effect=HomeAssistantError("broken")):
+        await step.async_restore()
+    assert device.target_temperature_step_status == "unknown"
+    assert "Could not load the Daikin temperature step" in caplog.text
+
+
+async def test_swallowed_write_error_is_retried(
+    hass: HomeAssistant, hass_storage: dict[str, Any]
+) -> None:
+    """Store logs a WriteError itself; the step is saved on the next sync."""
+    device = make_device()
+    step = DaikinTemperatureStep(hass, ENTRY_ID, device)
+    learns(device, "inferred")
+
+    with patch.object(Store, "_async_write_data", side_effect=WriteError("full")):
+        await step.async_set({"stemp": "22.5"})
+        await step.async_retry()
+    assert device.set.await_count == 1
+    assert stored(hass_storage) is None
+
+    await step.async_retry()
+    assert stored(hass_storage) == RECORD
+
+
+async def test_raised_save_error_is_isolated(
+    hass: HomeAssistant,
+    hass_storage: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An OSError from saving (e.g. creating .storage) never fails the command."""
+    device = make_device()
+    step = DaikinTemperatureStep(hass, ENTRY_ID, device)
+    learns(device, "inferred")
+
+    with patch.object(Store, "async_save", side_effect=OSError("read-only")):
+        await step.async_set({"stemp": "22.5"})
+    assert "Could not save the Daikin temperature step" in caplog.text
+
+    await step.async_retry()
+    assert stored(hass_storage) == RECORD
+
+
+async def test_device_error_keeps_its_exception(
+    hass: HomeAssistant, hass_storage: dict[str, Any]
+) -> None:
+    """A failing device command raises its own error and stores nothing."""
+    device = make_device()
+    step = DaikinTemperatureStep(hass, ENTRY_ID, device)
+    device.set = AsyncMock(side_effect=ValueError("rejected"))
+
+    with pytest.raises(ValueError, match="rejected"):
+        await step.async_set({"stemp": "17.5"})
+    assert stored(hass_storage) is None
+
+
+async def test_save_while_stopping_is_not_verified(
+    hass: HomeAssistant, hass_storage: dict[str, Any]
+) -> None:
+    """A save queued for the final write is retried, not trusted."""
+    device = make_device()
+    step = DaikinTemperatureStep(hass, ENTRY_ID, device)
+    learns(device, "inferred")
+
+    hass.set_state(CoreState.stopping)
+    with patch.object(Store, "async_load") as load:
+        await step.async_set({"stemp": "22.5"})
+    load.assert_not_called()
+
+    hass.set_state(CoreState.running)
+    await step.async_retry()
+    assert stored(hass_storage) == RECORD
+
+
+async def test_reset(hass: HomeAssistant, hass_storage: dict[str, Any]) -> None:
+    """A reset deletes the store first and then forgets the status."""
+    store_record(hass_storage, RECORD)
+    device = make_device()
+    step = DaikinTemperatureStep(hass, ENTRY_ID, device)
+    await step.async_restore()
 
     with (
-        patch.object(step.store, "async_remove", side_effect=OSError("disk error")),
+        patch.object(Store, "async_remove", side_effect=OSError("read-only")),
         pytest.raises(DaikinStepResetError),
     ):
         await step.async_reset()
-    assert step.status == "inferred"
+    assert device.target_temperature_step_status == "inferred"
+
+    await step.async_reset()
+    assert device.target_temperature_step_status == "unknown"
+    assert stored(hass_storage) is None
 
 
-async def test_failed_save_isolated(hass: HomeAssistant) -> None:
-    """Storage errors do not turn a successful device command into an error."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    step = DaikinTemperatureStep(hass, entry, make_device())
-
-    with patch.object(step.store, "async_save", side_effect=OSError("disk error")):
-        async with step.async_set_context():
-            step.device.target_temperature_step_status = "confirmed"
-    assert step.status == "confirmed"
-
-
-async def test_late_identity_enrichment(hass: HomeAssistant) -> None:
-    """Metadata learned after startup fills the persistent fingerprint."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    device = make_device(firmware=None)
-    step = DaikinTemperatureStep(hass, entry, device)
-    async with step.async_set_context():
-        device.target_temperature_step_status = "inferred"
-    assert (await step.store.async_load())["firmware_version"] is None
-
-    device.values["ver"] = "1_0_0"
-    await step.async_check_identity()
-    assert (await step.store.async_load())["firmware_version"] == "1_0_0"
-    assert step.status == "inferred"
-
-
-async def test_identity_change_invalidates(hass: HomeAssistant) -> None:
-    """Different known firmware invalidates a previously learned capability."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    step = DaikinTemperatureStep(hass, entry, make_device())
-    async with step.async_set_context():
-        step.device.target_temperature_step_status = "inferred"
-
-    changed = DaikinTemperatureStep(hass, entry, make_device(firmware="2_0_0"))
-    await changed.async_restore()
-    assert changed.status == "unknown"
-    assert await changed.store.async_load() is None
-
-
-async def test_concurrent_reset_wins(hass: HomeAssistant) -> None:
-    """Reset waits for the in-flight command's persistence to finish."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    step = DaikinTemperatureStep(hass, entry, make_device())
+async def test_reset_waits_for_running_command(
+    hass: HomeAssistant, hass_storage: dict[str, Any]
+) -> None:
+    """A reset during a command runs after its save and wins."""
+    device = make_device()
+    step = DaikinTemperatureStep(hass, ENTRY_ID, device)
     started = asyncio.Event()
     finish = asyncio.Event()
 
-    async def device_transaction() -> None:
-        async with step.async_set_context():
-            step.device.target_temperature_step_status = "inferred"
-            started.set()
-            await finish.wait()
+    async def _set(settings: dict[str, Any]) -> None:
+        device.target_temperature_step_status = "inferred"
+        started.set()
+        await finish.wait()
 
-    command = asyncio.create_task(device_transaction())
+    device.set = AsyncMock(side_effect=_set)
+    command = asyncio.create_task(step.async_set({"stemp": "22.5"}))
     await started.wait()
     reset = asyncio.create_task(step.async_reset())
     await asyncio.sleep(0)
     finish.set()
     await asyncio.gather(command, reset)
 
-    assert step.status == "unknown"
-    assert await step.store.async_load() is None
+    assert device.target_temperature_step_status == "unknown"
+    assert stored(hass_storage) is None
 
 
-def _record(**identity: str | None) -> dict[str, str | None]:
-    """Return a stored record of a learned whole-degree step."""
-    return {
-        "status": "inferred",
-        "device_mac": "aa:bb:cc:dd:ee:ff",
-        "model": "TEST",
-        "firmware_version": "1_0_0",
-        "learned_at": "2026-11-01T00:00:00+00:00",
-        **identity,
-    }
-
-
-def _coordinator() -> MagicMock:
-    """Return a coordinator stand-in that records its listeners."""
-    coordinator = MagicMock()
-    coordinator.listeners = []
-
-    def _add(listener):
-        coordinator.listeners.append(listener)
-        return MagicMock(name="unsub")
-
-    coordinator.async_add_listener.side_effect = _add
-    return coordinator
-
-
-async def test_load_error_keeps_device_status(
-    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+async def test_closed_store_saves_nothing(
+    hass: HomeAssistant, hass_storage: dict[str, Any]
 ) -> None:
-    """An unreadable store leaves pydaikin's own status and is only logged."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    step = DaikinTemperatureStep(hass, entry, make_device())
-
-    with patch.object(
-        step.store, "async_load", side_effect=HomeAssistantError("broken")
-    ):
-        await step.async_restore()
-
-    assert step.status == "unknown"
-    assert "Unable to load Daikin step detection" in caplog.text
-
-
-async def test_rejected_saved_status_is_ignored(hass: HomeAssistant) -> None:
-    """A status pydaikin refuses to restore is dropped, not applied."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    step = DaikinTemperatureStep(hass, entry, make_device())
-    await step.store.async_save(_record())
-
-    def _refuse(self: DaikinBRP069, value: str) -> None:
-        raise ValueError(value)
-
-    refusing = property(lambda self: "unknown", _refuse)
-    with patch.object(DaikinBRP069, "target_temperature_step_status", refusing):
-        await step.async_restore()
-        assert step.status == "unknown"
-
-    async with step.async_set_context():
-        pass
-    assert (await step.store.async_load())["status"] == "inferred"
-
-
-async def test_learning_replaces_record_of_previous_device(
-    hass: HomeAssistant,
-) -> None:
-    """A result learned now replaces a record that belongs to other firmware."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    device = make_device(firmware=None)
-    step = DaikinTemperatureStep(hass, entry, device)
-    await step.store.async_save(_record())
-    await step.async_restore()
-    assert step.status == "inferred"
-
-    device.values["ver"] = "2_0_0"
-    async with step.async_set_context():
-        device.target_temperature_step_status = "confirmed"
-
-    record = await step.store.async_load()
-    assert record["status"] == "confirmed"
-    assert record["firmware_version"] == "2_0_0"
-    assert step.status == "confirmed"
-
-
-async def test_identity_listener_invalidates_once(hass: HomeAssistant) -> None:
-    """Late firmware info invalidates via one managed task, then stops watching."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    device = make_device(firmware=None)
-    step = DaikinTemperatureStep(hass, entry, device)
-    await step.store.async_save(_record())
-    await step.async_restore()
-    coordinator = _coordinator()
-    step.bind_coordinator(coordinator)
-
-    step.watch_identity()
-    step.watch_identity()
-    assert len(coordinator.listeners) == 1
-
-    device.values["ver"] = "2_0_0"
-    release = asyncio.Event()
-    remove = step.store.async_remove
-
-    async def _slow_remove() -> None:
-        await release.wait()
-        await remove()
-
-    with (
-        patch.object(step.store, "async_remove", side_effect=_slow_remove),
-        patch.object(
-            entry,
-            "async_create_background_task",
-            wraps=entry.async_create_background_task,
-        ) as create_task,
-    ):
-        coordinator.listeners[0]()
-        assert not step._identity_task.done()
-        coordinator.listeners[0]()
-        release.set()
-        await hass.async_block_till_done()
-
-    assert create_task.call_count == 1
-    assert step.status == "unknown"
-    assert await step.store.async_load() is None
-    coordinator.async_update_listeners.assert_called_once()
-    assert step._unsub_identity is None
-
-
-async def test_identity_listener_completes_record(hass: HomeAssistant) -> None:
-    """Metadata that arrives later completes the record and ends the watch."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    device = make_device(firmware=None)
-    step = DaikinTemperatureStep(hass, entry, device)
-    await step.store.async_save(_record(firmware_version=None))
-    await step.async_restore()
-    coordinator = _coordinator()
-    step.bind_coordinator(coordinator)
-    step.watch_identity()
-
-    coordinator.listeners[0]()
-    await hass.async_block_till_done()
-    assert step._unsub_identity is not None
-
-    device.values["ver"] = "1_0_0"
-    coordinator.listeners[0]()
-    await hass.async_block_till_done()
-
-    assert (await step.store.async_load())["firmware_version"] == "1_0_0"
-    assert step.status == "inferred"
-    assert step._unsub_identity is None
-
-
-async def test_close_cancels_identity_task_and_blocks_writes(
-    hass: HomeAssistant,
-) -> None:
-    """Unloading cancels pending metadata work and refuses later commands."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    device = make_device(firmware=None)
-    step = DaikinTemperatureStep(hass, entry, device)
-    await step.store.async_save(_record())
-    await step.async_restore()
-    coordinator = _coordinator()
-    step.bind_coordinator(coordinator)
-    step.watch_identity()
-    blocked = asyncio.Event()
-
-    async def _hang() -> None:
-        blocked.set()
-        await asyncio.Event().wait()
-
-    device.values["ver"] = "2_0_0"
-    with patch.object(step.store, "async_remove", side_effect=_hang):
-        coordinator.listeners[0]()
-        await blocked.wait()
-        await step.async_close()
-
-    assert step._identity_task.cancelled()
-    with pytest.raises(HomeAssistantError):
-        async with step.async_set_context():
-            pass
-    with pytest.raises(DaikinStepResetError):
-        await step.async_reset()
-
-
-async def test_remove_store_error_is_logged(
-    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Removing the entry never fails on a storage error."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    with patch(
-        "homeassistant.helpers.storage.Store.async_remove",
-        side_effect=OSError("read-only"),
-    ):
-        await async_remove_step_store(hass, entry)
-    assert "Unable to remove Daikin step storage" in caplog.text
-
-
-async def test_failed_invalidation_is_retried(hass: HomeAssistant) -> None:
-    """A stale record that cannot be removed keeps the watch for a retry."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    device = make_device(firmware=None)
-    step = DaikinTemperatureStep(hass, entry, device)
-    await step.store.async_save(_record())
-    await step.async_restore()
-    coordinator = _coordinator()
-    step.bind_coordinator(coordinator)
-    step.watch_identity()
-
-    device.values["ver"] = "2_0_0"
-    with patch.object(step.store, "async_remove", side_effect=OSError("busy")):
-        coordinator.listeners[0]()
-        await hass.async_block_till_done()
-    assert step.status == "unknown"
-    assert step._unsub_identity is not None
-
-    coordinator.listeners[0]()
-    await hass.async_block_till_done()
-    assert await step.store.async_load() is None
-    assert step._unsub_identity is None
-
-
-async def test_same_status_is_saved_only_when_identity_grows(
-    hass: HomeAssistant,
-) -> None:
-    """Repeating a learned status writes nothing unless metadata was added."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    device = make_device(firmware=None)
-    step = DaikinTemperatureStep(hass, entry, device)
-    async with step.async_set_context():
-        device.target_temperature_step_status = "inferred"
-
-    with patch.object(step.store, "async_save") as save:
-        async with step.async_set_context():
-            pass
-    save.assert_not_called()
-
-    device.values["ver"] = "1_0_0"
-    async with step.async_set_context():
-        pass
-    assert (await step.store.async_load())["firmware_version"] == "1_0_0"
-
-
-async def test_status_change_keeps_known_identity(hass: HomeAssistant) -> None:
-    """A new status keeps stored fields the device does not report right now."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
+    """After unloading, a late command no longer writes the store."""
     device = make_device()
-    step = DaikinTemperatureStep(hass, entry, device)
-    async with step.async_set_context():
-        device.target_temperature_step_status = "inferred"
+    step = DaikinTemperatureStep(hass, ENTRY_ID, device)
+    await step.async_close()
+    learns(device, "inferred")
 
-    del device.values["ver"]
-    async with step.async_set_context():
-        device.target_temperature_step_status = "confirmed"
-
-    record = await step.store.async_load()
-    assert record["status"] == "confirmed"
-    assert record["firmware_version"] == "1_0_0"
+    await step.async_set({"stemp": "22.5"})
+    assert device.set.await_count == 1
+    assert stored(hass_storage) is None
 
 
-async def test_listener_without_changes_does_nothing(hass: HomeAssistant) -> None:
-    """An update without new metadata starts no task and keeps watching."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    device = make_device(firmware=None)
-    step = DaikinTemperatureStep(hass, entry, device)
-    await step.store.async_save(_record(firmware_version=None))
-    await step.async_restore()
-    coordinator = _coordinator()
-    step.bind_coordinator(coordinator)
-    step.watch_identity()
-
-    with patch.object(entry, "async_create_background_task") as create_task:
-        coordinator.listeners[0]()
-    create_task.assert_not_called()
-    assert step._unsub_identity is not None
-
-
-async def test_listener_stops_when_nothing_is_left_to_watch(
-    hass: HomeAssistant,
+async def test_remove_error_is_logged(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The watch ends once metadata matches, and after a reset."""
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-    device = make_device(firmware=None)
-    step = DaikinTemperatureStep(hass, entry, device)
-    await step.store.async_save(_record())
-    await step.async_restore()
-    coordinator = _coordinator()
-    step.bind_coordinator(coordinator)
-    step.watch_identity()
+    """Removing a config entry never fails on a storage error."""
+    with patch.object(Store, "async_remove", side_effect=OSError("read-only")):
+        await async_remove_temperature_step(hass, ENTRY_ID)
+    assert "Could not remove the Daikin temperature step" in caplog.text
 
-    device.values["ver"] = "1_0_0"
-    coordinator.listeners[0]()
-    assert step._unsub_identity is None
 
-    step.watch_identity()
-    assert len(coordinator.listeners) == 1
-    await step.async_reset()
-    coordinator.listeners[0]()
-    assert step._unsub_identity is None
+async def test_stale_record_remove_error_is_logged(
+    hass: HomeAssistant,
+    hass_storage: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stale record that cannot be removed is logged, setup continues."""
+    store_record(hass_storage, {**RECORD, "firmware_version": "2_0_0"})
+    device = make_device()
+    with patch.object(Store, "async_remove", side_effect=OSError("read-only")):
+        await DaikinTemperatureStep(hass, ENTRY_ID, device).async_restore()
+    assert device.target_temperature_step_status == "unknown"
+    assert "Could not remove the Daikin temperature step" in caplog.text
