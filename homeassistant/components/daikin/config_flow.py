@@ -197,27 +197,40 @@ class DaikinOptionsFlow(OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Show the learned step; submitting resets it without device I/O."""
+        """Show the learned step and offer to keep or reset it."""
         if isinstance(step := self._learned_step(), str):
             return self.async_abort(reason=step)
+        if step.status == "confirmed":
+            return await self.async_step_confirmed()
+        return await self.async_step_inferred()
 
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            try:
-                await step.async_reset()
-            except DaikinStepResetError:
-                errors["base"] = "reset_failed"
-            else:
-                self.config_entry.runtime_data.async_update_listeners()
-                return self.async_abort(reason="reset_successful")
+    async def async_step_confirmed(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the menu for a confirmed half-degree step."""
+        return self.async_show_menu(step_id="confirmed", menu_options=["keep", "reset"])
 
-        return self.async_show_form(
-            step_id="init",
-            data_schema=probatio.Schema({}),
-            description_placeholders={
-                "step": str(
-                    self.config_entry.runtime_data.device.target_temperature_step
-                )
-            },
-            errors=errors,
-        )
+    async def async_step_inferred(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the menu for an inferred whole-degree step."""
+        return self.async_show_menu(step_id="inferred", menu_options=["keep", "reset"])
+
+    async def async_step_keep(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Leave the learned step unchanged."""
+        return self.async_abort(reason="step_kept")
+
+    async def async_step_reset(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Forget the learned step without contacting the device."""
+        if isinstance(step := self._learned_step(), str):
+            return self.async_abort(reason=step)
+        try:
+            await step.async_reset()
+        except DaikinStepResetError:
+            return self.async_abort(reason="reset_failed")
+        self.config_entry.runtime_data.async_update_listeners()
+        return self.async_abort(reason="reset_successful")
