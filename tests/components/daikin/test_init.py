@@ -33,6 +33,7 @@ def mock_daikin():
         type(Appliance).device_ip = PropertyMock(return_value=HOST)
         type(Appliance).inside_temperature = PropertyMock(return_value=22)
         type(Appliance).target_temperature = PropertyMock(return_value=22)
+        type(Appliance).target_temperature_step = PropertyMock(return_value=1.0)
         type(Appliance).zones = PropertyMock(return_value=[("Zone 1", "0", 0)])
         type(Appliance).fan_rate = PropertyMock(return_value=[])
         type(Appliance).swing_modes = PropertyMock(return_value=[])

@@ -65,6 +65,9 @@
     "demand_control_unsupported": {
       "message": "This Daikin device does not support demand control."
     },
+    "entry_unloaded": {
+      "message": "The Daikin integration is unloading; the command was not sent."
+    },
     "error_communicating": {
       "message": "Error communicating with Daikin device: {error}"
     },
@@ -88,6 +91,34 @@
     },
     "zone_temperature_missing": {
       "message": "Provide a temperature value when adjusting a zone."
+    }
+  },
+  "options": {
+    "abort": {
+      "reset_failed": "The stored detection could not be removed, so nothing was changed. Check the logs and try again.",
+      "reset_successful": "Detection reset. Home Assistant offers 0.5 °C again and checks with the next half-degree temperature you set. The unit was not changed.",
+      "step_fixed": "This adapter has a fixed temperature step, so there is nothing to detect.",
+      "step_kept": "Nothing was changed.",
+      "step_not_loaded": "The Daikin integration is not loaded. Try again once it is running.",
+      "step_unknown": "Not detected yet. Home Assistant offers 0.5 °C; the first half-degree temperature you set checks whether the unit accepts it."
+    },
+    "step": {
+      "confirmed": {
+        "description": "Detected: **0.5 °C**. The unit accepted a half-degree temperature. Home Assistant keeps this across restarts.",
+        "menu_options": {
+          "keep": "Keep",
+          "reset": "Reset detection"
+        },
+        "title": "Temperature step"
+      },
+      "inferred": {
+        "description": "Detected: **1 °C**. The unit rejected a half-degree temperature, so Home Assistant offers whole degrees. Home Assistant keeps this across restarts.",
+        "menu_options": {
+          "keep": "Keep",
+          "reset": "Reset detection"
+        },
+        "title": "Temperature step"
+      }
     }
   },
   "selector": {

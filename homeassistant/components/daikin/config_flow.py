@@ -12,13 +12,21 @@ from pydaikin.discovery import Discovery
 from pydaikin.exceptions import DaikinException
 from pydaikin.factory import DaikinFactory
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntryState,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_API_KEY, CONF_HOST, CONF_PASSWORD, CONF_UUID
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from homeassistant.util.ssl import client_context_no_verify
 
 from .const import DOMAIN, KEY_MAC, TIMEOUT_SEC
+from .coordinator import DaikinConfigEntry
+from .temperature_step import DaikinStepResetError, DaikinTemperatureStep
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +35,15 @@ class FlowHandler(ConfigFlow, domain=DOMAIN):
     """Handle a config flow."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    @override
+    def async_get_options_flow(
+        config_entry: DaikinConfigEntry,
+    ) -> DaikinOptionsFlow:
+        """Return the flow for inspecting and resetting learned step detection."""
+        return DaikinOptionsFlow()
 
     def __init__(self) -> None:
         """Initialize the Daikin config flow."""
@@ -161,3 +178,59 @@ class FlowHandler(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
         self.host = discovery_info.host
         return await self.async_step_user()
+
+
+class DaikinOptionsFlow(OptionsFlow):
+    """Show the learned step and let users explicitly reset it."""
+
+    def _learned_step(self) -> DaikinTemperatureStep | str:
+        """Return the learned step adapter, or why there is nothing to reset."""
+        if self.config_entry.state is not ConfigEntryState.LOADED:
+            return "step_not_loaded"
+        step = self.config_entry.runtime_data.temperature_step
+        if step is None:
+            return "step_fixed"
+        if step.status == "unknown":
+            return "step_unknown"
+        return step
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the learned step and offer to keep or reset it."""
+        if isinstance(step := self._learned_step(), str):
+            return self.async_abort(reason=step)
+        if step.status == "confirmed":
+            return await self.async_step_confirmed()
+        return await self.async_step_inferred()
+
+    async def async_step_confirmed(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the menu for a confirmed half-degree step."""
+        return self.async_show_menu(step_id="confirmed", menu_options=["keep", "reset"])
+
+    async def async_step_inferred(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the menu for an inferred whole-degree step."""
+        return self.async_show_menu(step_id="inferred", menu_options=["keep", "reset"])
+
+    async def async_step_keep(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Leave the learned step unchanged."""
+        return self.async_abort(reason="step_kept")
+
+    async def async_step_reset(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Forget the learned step without contacting the device."""
+        if isinstance(step := self._learned_step(), str):
+            return self.async_abort(reason=step)
+        try:
+            await step.async_reset()
+        except DaikinStepResetError:
+            return self.async_abort(reason="reset_failed")
+        self.config_entry.runtime_data.async_update_listeners()
+        return self.async_abort(reason="reset_successful")

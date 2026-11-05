@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN, TIMEOUT_SEC
+from .temperature_step import DaikinTemperatureStep
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -22,7 +23,11 @@ class DaikinCoordinator(DataUpdateCoordinator[None]):
     """Class to manage fetching Daikin data."""
 
     def __init__(
-        self, hass: HomeAssistant, entry: DaikinConfigEntry, device: Appliance
+        self,
+        hass: HomeAssistant,
+        entry: DaikinConfigEntry,
+        device: Appliance,
+        temperature_step: DaikinTemperatureStep | None = None,
     ) -> None:
         """Initialize global Daikin data updater."""
         super().__init__(
@@ -33,6 +38,7 @@ class DaikinCoordinator(DataUpdateCoordinator[None]):
             update_interval=timedelta(seconds=TIMEOUT_SEC),
         )
         self.device = device
+        self.temperature_step = temperature_step
 
     @override
     async def _async_update_data(self) -> None:
@@ -44,3 +50,6 @@ class DaikinCoordinator(DataUpdateCoordinator[None]):
                 translation_key="error_communicating",
                 translation_placeholders={"error": str(err)},
             ) from err
+        if self.temperature_step is not None:
+            # Retries a learned step whose save failed, no I/O otherwise
+            await self.temperature_step.async_retry()
