@@ -1,5 +1,7 @@
 """Persist learned Daikin target temperature step between Home Assistant restarts."""
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
@@ -195,10 +197,13 @@ class DaikinTemperatureStep:
             if self._record.get("status") == status:
                 # Missing identity fields may become available after learning.
                 mismatch, additions = self._identity_changes()
-                if not mismatch and not additions:
+                if mismatch:
+                    # Never persist a learned status against a different device.
+                    await self._async_invalidate_locked()
                     return
-                if not mismatch:
-                    record = {**self._record, **additions}
+                if not additions:
+                    return
+                record = {**self._record, **additions}
             else:
                 for key in _IDENTITY_FIELDS:
                     if record[key] is None:
