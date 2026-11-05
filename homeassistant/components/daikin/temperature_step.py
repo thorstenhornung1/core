@@ -150,8 +150,10 @@ class DaikinTemperatureStep:
             elif additions:
                 record = {**self._record, **additions}
                 await self._async_save_locked(record)
+            still_mismatched = self._record is not None and self._identity_changes()[0]
             if self._record is None or (
-                self._current_identity_complete()
+                not still_mismatched
+                and self._current_identity_complete()
                 and all(self._record.get(field) is not None for field in _IDENTITY_FIELDS)
             ):
                 self._stop_watching()
@@ -252,7 +254,8 @@ class DaikinTemperatureStep:
             or self._coordinator is None
             or self._unsub_identity is not None
             or (
-                self._current_identity_complete()
+                not self._identity_changes()[0]
+                and self._current_identity_complete()
                 and all(self._record.get(key) is not None for key in _IDENTITY_FIELDS)
             )
         ):
