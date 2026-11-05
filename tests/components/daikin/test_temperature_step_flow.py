@@ -21,10 +21,11 @@ from homeassistant.components.climate import (
     SERVICE_SET_TEMPERATURE,
 )
 from homeassistant.components.daikin.const import DOMAIN, KEY_MAC
-from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import ATTR_ENTITY_ID, ATTR_TEMPERATURE, CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers.storage import Store
+from homeassistant.util.file import WriteError
 
 HOST = "192.0.2.20"
 MAC = "aabbccddeeff"
@@ -202,26 +203,27 @@ async def test_rejection_without_fallback_learns_nothing(
 
 
 @pytest.mark.usefixtures("real_factory")
-async def test_write_error_does_not_fail_command(
+async def test_write_error_is_retried_by_the_coordinator(
     hass: HomeAssistant,
     aioclient_mock: AiohttpClientMocker,
+    hass_storage: dict[str, Any],
 ) -> None:
-    """A disk error inside HA's Store leaves the device command successful."""
+    """A write error Store swallows keeps the command working; a refresh retries."""
     fake = FakeBRP069(half_degree=False)
     _register(aioclient_mock, fake)
     entry = await _setup(hass)
+    key = STORAGE_KEY.format(entry.entry_id)
 
-    with patch(
-        "homeassistant.helpers.storage.write_utf8_file_atomic",
-        side_effect=OSError("disk full"),
-    ):
+    with patch.object(Store, "_async_write_data", side_effect=WriteError("full")):
         await _set_temperature(hass, 22.5)
-        await hass.async_block_till_done()
 
     state = hass.states.get(_climate(hass))
     assert state.attributes[ATTR_TEMPERATURE] == 23
     assert state.attributes[ATTR_TARGET_TEMP_STEP] == 1.0
-    assert entry.state is ConfigEntryState.LOADED
+    assert key not in hass_storage
+
+    await entry.runtime_data.async_refresh()
+    assert hass_storage[key]["data"]["status"] == "inferred"
 
 
 @pytest.mark.usefixtures("real_factory")
@@ -243,9 +245,7 @@ async def test_firmware_change_invalidates_on_setup(
         "data": {
             "status": "inferred",
             "device_mac": "aa:bb:cc:dd:ee:ff",
-            "model": "0FC1",
             "firmware_version": "1_0_0",
-            "learned_at": "2026-11-01T00:00:00+00:00",
         },
     }
     _register(aioclient_mock, FakeBRP069(half_degree=True, ver="1_14_88"))
@@ -280,13 +280,8 @@ async def test_options_flow_reset(
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "init"
     assert result["description_placeholders"] == {"step": "1.0"}
-    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
-    assert result["step_id"] == "confirm_reset"
 
-    with patch(
-        "homeassistant.helpers.storage.Store.async_remove",
-        side_effect=OSError("read-only"),
-    ):
+    with patch.object(Store, "async_remove", side_effect=OSError("read-only")):
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], {}
         )
@@ -302,11 +297,9 @@ async def test_options_flow_reset(
     assert hass.states.get(_climate(hass)).attributes[ATTR_TARGET_TEMP_STEP] == 0.5
     assert STORAGE_KEY.format(entry.entry_id) not in hass_storage
 
-    # The entry is unloaded while the reset confirmation is still open
+    # The entry is unloaded while the dialog is open
     await _set_temperature(hass, 22.5)
     result = await hass.config_entries.options.async_init(entry.entry_id)
-    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
-    assert result["step_id"] == "confirm_reset"
     assert await hass.config_entries.async_unload(entry.entry_id)
     result = await hass.config_entries.options.async_configure(result["flow_id"], {})
     assert result["type"] is FlowResultType.ABORT

@@ -32,7 +32,7 @@ from .coordinator import DaikinConfigEntry, DaikinCoordinator
 from .services import async_setup_services
 from .temperature_step import (
     DaikinTemperatureStep,
-    async_remove_step_store,
+    async_remove_temperature_step,
     supports_step_learning,
 )
 
@@ -83,22 +83,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: DaikinConfigEntry) -> No
         _LOGGER.debug("DaikinException from %s: %s", host, err)
         raise ConfigEntryNotReady from err
 
-    step = (
-        DaikinTemperatureStep(hass, entry, device)
-        if supports_step_learning(device)
-        else None
-    )
-    if step is not None:
+    step = None
+    if supports_step_learning(device):
+        step = DaikinTemperatureStep(hass, entry.entry_id, device)
         await step.async_restore()
 
     coordinator = DaikinCoordinator(hass, entry, device, step)
-    if step is not None:
-        step.bind_coordinator(coordinator)
 
     await coordinator.async_config_entry_first_refresh()
-    if step is not None:
-        await step.async_check_identity()
-        step.watch_identity()
 
     await async_migrate_unique_id(hass, entry, device)
 
@@ -115,7 +107,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: DaikinConfigEntry) -> N
 
 async def async_remove_entry(hass: HomeAssistant, entry: DaikinConfigEntry) -> None:
     """Remove saved target temperature step state with the entry."""
-    await async_remove_step_store(hass, entry)
+    await async_remove_temperature_step(hass, entry.entry_id)
 
 
 async def async_migrate_unique_id(
