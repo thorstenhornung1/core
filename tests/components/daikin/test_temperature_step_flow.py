@@ -269,7 +269,7 @@ async def test_options_flow_reset(
     aioclient_mock: AiohttpClientMocker,
     hass_storage: dict[str, Any],
 ) -> None:
-    """The options flow resets a learned step without contacting the device."""
+    """The options menu keeps or resets a learned step without device I/O."""
     fake = FakeBRP069(half_degree=False)
     _register(aioclient_mock, fake)
     entry = await _setup(hass)
@@ -281,20 +281,33 @@ async def test_options_flow_reset(
     await _set_temperature(hass, 22.5)
     requests = aioclient_mock.call_count
 
+    # Opening and keeping changes nothing
     result = await hass.config_entries.options.async_init(entry.entry_id)
-    assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "init"
-    assert result["description_placeholders"] == {"step": "1.0"}
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "inferred"
+    assert result["menu_options"] == ["keep", "reset"]
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "keep"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "step_kept"
+    assert entry.runtime_data.device.target_temperature_step_status == "inferred"
+    assert STORAGE_KEY.format(entry.entry_id) in hass_storage
 
+    # A failed deletion is reported and changes nothing
+    result = await hass.config_entries.options.async_init(entry.entry_id)
     with patch.object(Store, "async_remove", side_effect=OSError("read-only")):
         result = await hass.config_entries.options.async_configure(
-            result["flow_id"], {}
+            result["flow_id"], {"next_step_id": "reset"}
         )
-    assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {"base": "reset_failed"}
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reset_failed"
     assert entry.runtime_data.device.target_temperature_step_status == "inferred"
 
-    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "reset"}
+    )
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reset_successful"
     assert aioclient_mock.call_count == requests
@@ -302,13 +315,29 @@ async def test_options_flow_reset(
     assert hass.states.get(_climate(hass)).attributes[ATTR_TARGET_TEMP_STEP] == 0.5
     assert STORAGE_KEY.format(entry.entry_id) not in hass_storage
 
-    # The entry is unloaded while the dialog is open
+    # The entry is unloaded while the menu is open
     await _set_temperature(hass, 22.5)
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert await hass.config_entries.async_unload(entry.entry_id)
-    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "reset"}
+    )
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "step_not_loaded"
+
+
+@pytest.mark.usefixtures("real_factory")
+async def test_options_flow_confirmed_menu(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+) -> None:
+    """A confirmed half degree shows its own menu text."""
+    _register(aioclient_mock, FakeBRP069(half_degree=True))
+    entry = await _setup(hass)
+    await _set_temperature(hass, 22.5)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "confirmed"
 
 
 @pytest.mark.usefixtures("real_factory")
