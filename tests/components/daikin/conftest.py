@@ -52,6 +52,7 @@ def zone_device() -> Generator[ZoneDevice]:
     """Return a mocked zone-capable Daikin device and patch its factory."""
     device = MagicMock(name="DaikinZoneDevice")
     device.mac = "001122334455"
+    device.target_temperature_step = 1.0
     device.fan_rate = []
     device.swing_modes = []
     device.support_away_mode = False
