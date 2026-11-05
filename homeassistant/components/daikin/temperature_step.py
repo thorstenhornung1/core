@@ -1,7 +1,5 @@
 """Persist learned Daikin target temperature step between Home Assistant restarts."""
 
-from __future__ import annotations
-
 import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
@@ -34,8 +32,7 @@ class DaikinStepResetError(Exception):
 def supports_step_learning(device: Appliance) -> TypeGuard[DaikinBRP069]:
     """Narrow to half-degree learning BRP069-family devices, excluding AirBase."""
     return (
-        isinstance(device, DaikinBRP069)
-        and type(device).TARGET_TEMPERATURE_STEP == 0.5
+        isinstance(device, DaikinBRP069) and type(device).TARGET_TEMPERATURE_STEP == 0.5
     )
 
 
@@ -117,7 +114,7 @@ class DaikinTemperatureStep:
         """Restore learned status before the first coordinator refresh."""
         try:
             data = await self.store.async_load()
-        except Exception as err:
+        except (HomeAssistantError, OSError) as err:
             _LOGGER.warning("Unable to load Daikin step detection: %s", err)
             return
 
@@ -139,6 +136,7 @@ class DaikinTemperatureStep:
     def bind_coordinator(self, coordinator: DaikinCoordinator) -> None:
         """Link updates after setup without exposing persistence to pydaikin."""
         self._coordinator = coordinator
+        self.entry.async_on_unload(self._stop_watching)
 
     async def async_check_identity(self) -> None:
         """Validate a restored fingerprint and learn metadata as it arrives."""
@@ -155,7 +153,9 @@ class DaikinTemperatureStep:
             if self._record is None or (
                 not still_mismatched
                 and self._current_identity_complete()
-                and all(self._record.get(field) is not None for field in _IDENTITY_FIELDS)
+                and all(
+                    self._record.get(field) is not None for field in _IDENTITY_FIELDS
+                )
             ):
                 self._stop_watching()
 
@@ -174,7 +174,7 @@ class DaikinTemperatureStep:
         """Remove a stale record without interrupting device operations."""
         try:
             await self.store.async_remove()
-        except Exception as err:
+        except OSError as err:
             _LOGGER.warning("Unable to remove outdated Daikin step detection: %s", err)
             # Keep the fingerprint to retry its invalidation on a later update.
             return
@@ -185,9 +185,11 @@ class DaikinTemperatureStep:
         """Submit a learned result to HA's store, isolating write failures."""
         try:
             await self.store.async_save(record)
-        except Exception as err:
+        except (HomeAssistantError, OSError) as err:
+            # Keep the old record so the next device transaction retries
             _LOGGER.warning("Unable to save Daikin step detection: %s", err)
-        # Store may log disk errors internally without raising to its caller.
+            return
+        # Store logs disk errors (WriteError) itself without raising
         self._record = record
 
     async def _async_save_if_changed_locked(self) -> None:
@@ -204,8 +206,11 @@ class DaikinTemperatureStep:
         if self._record is not None:
             mismatch, additions = self._identity_changes()
             if mismatch:
-                # Never persist any learned result against a different device.
-                await self._async_invalidate_locked()
+                # The old record belongs to another device; this result was
+                # just learned from the current one, so it replaces the record
+                _LOGGER.info("Replacing Daikin step detection of a previous device")
+                await self._async_save_locked(record)
+                self.watch_identity()
                 return
             if self._record.get("status") == status:
                 # Missing identity fields may become available after learning.
@@ -237,7 +242,7 @@ class DaikinTemperatureStep:
                 raise DaikinStepResetError("Daikin config entry is unloading")
             try:
                 await self.store.async_remove()
-            except Exception as err:
+            except OSError as err:
                 _LOGGER.warning("Unable to reset Daikin step detection: %s", err)
                 raise DaikinStepResetError from err
             self._record = None
@@ -264,7 +269,6 @@ class DaikinTemperatureStep:
         self._unsub_identity = self._coordinator.async_add_listener(
             self._identity_updated
         )
-        self.entry.async_on_unload(self._stop_watching)
 
     @callback
     def _identity_updated(self) -> None:
@@ -311,5 +315,5 @@ async def async_remove_step_store(hass: HomeAssistant, entry: ConfigEntry) -> No
     )
     try:
         await store.async_remove()
-    except Exception as err:
+    except OSError as err:
         _LOGGER.warning("Unable to remove Daikin step storage: %s", err)

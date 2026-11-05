@@ -1,7 +1,5 @@
 """Config flow for the Daikin platform."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 from typing import Any, override
@@ -28,7 +26,7 @@ from homeassistant.util.ssl import client_context_no_verify
 
 from .const import DOMAIN, KEY_MAC, TIMEOUT_SEC
 from .coordinator import DaikinConfigEntry
-from .temperature_step import DaikinStepResetError
+from .temperature_step import DaikinStepResetError, DaikinTemperatureStep
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -185,19 +183,23 @@ class FlowHandler(ConfigFlow, domain=DOMAIN):
 class DaikinOptionsFlow(OptionsFlow):
     """Show the learned step and let users explicitly reset it."""
 
-    @override
+    def _learned_step(self) -> DaikinTemperatureStep | str:
+        """Return the learned step adapter, or why there is nothing to reset."""
+        if self.config_entry.state is not ConfigEntryState.LOADED:
+            return "step_not_loaded"
+        step = self.config_entry.runtime_data.temperature_step
+        if step is None:
+            return "step_fixed"
+        if step.status == "unknown":
+            return "step_unknown"
+        return step
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Show current detection before offering reset."""
-        if self.config_entry.state is not ConfigEntryState.LOADED:
-            return self.async_abort(reason="step_not_loaded")
-
-        step = self.config_entry.runtime_data.temperature_step
-        if step is None:
-            return self.async_abort(reason="step_fixed")
-        if step.status == "unknown":
-            return self.async_abort(reason="step_unknown")
+        if isinstance(step := self._learned_step(), str):
+            return self.async_abort(reason=step)
 
         if user_input is not None:
             return await self.async_step_confirm_reset()
@@ -205,22 +207,15 @@ class DaikinOptionsFlow(OptionsFlow):
         return self.async_show_form(
             step_id="init",
             data_schema=probatio.Schema({}),
-            description_placeholders={
-                "step": str(step.device.target_temperature_step)
-            },
+            description_placeholders={"step": str(step.device.target_temperature_step)},
         )
 
     async def async_step_confirm_reset(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Confirm and perform a storage-first, device-free reset."""
-        if self.config_entry.state is not ConfigEntryState.LOADED:
-            return self.async_abort(reason="step_not_loaded")
-        step = self.config_entry.runtime_data.temperature_step
-        if step is None:
-            return self.async_abort(reason="step_fixed")
-        if step.status == "unknown":
-            return self.async_abort(reason="step_unknown")
+        if isinstance(step := self._learned_step(), str):
+            return self.async_abort(reason=step)
 
         errors: dict[str, str] = {}
         if user_input is not None:

@@ -83,7 +83,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: DaikinConfigEntry) -> No
         _LOGGER.debug("DaikinException from %s: %s", host, err)
         raise ConfigEntryNotReady from err
 
-    step = DaikinTemperatureStep(hass, entry, device) if supports_step_learning(device) else None
+    step = (
+        DaikinTemperatureStep(hass, entry, device)
+        if supports_step_learning(device)
+        else None
+    )
     if step is not None:
         await step.async_restore()
 
