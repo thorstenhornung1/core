@@ -241,7 +241,11 @@ class DaikinClimate(DaikinEntity, ClimateEntity):
                     _LOGGER.error("Invalid temperature %s", value)
 
         if values:
-            await self.device.set(values)
+            if (step := self.coordinator.temperature_step) is not None:
+                async with step.async_set_context():
+                    await self.device.set(values)
+            else:
+                await self.device.set(values)
             await self.coordinator.async_refresh()
 
     @property
