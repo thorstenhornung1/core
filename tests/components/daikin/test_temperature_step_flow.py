@@ -1,14 +1,16 @@
 """End-to-end tests for the Daikin temperature step with a real pydaikin device."""
 
 from collections.abc import Generator
+from datetime import timedelta
 import re
 from typing import Any
 from unittest.mock import patch
 
+from freezegun.api import FrozenDateTimeFactory
 from pydaikin.daikin_brp069 import DaikinBRP069
 from pydaikin.exceptions import DaikinCommandRejected
 import pytest
-from pytest_homeassistant.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 from pytest_homeassistant.test_util.aiohttp import (
     AiohttpClientMocker,
     AiohttpClientMockResponse,
@@ -20,7 +22,7 @@ from homeassistant.components.climate import (
     DOMAIN as CLIMATE_DOMAIN,
     SERVICE_SET_TEMPERATURE,
 )
-from homeassistant.components.daikin.const import DOMAIN, KEY_MAC
+from homeassistant.components.daikin.const import DOMAIN, KEY_MAC, TIMEOUT_SEC
 from homeassistant.const import ATTR_ENTITY_ID, ATTR_TEMPERATURE, CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
@@ -207,6 +209,7 @@ async def test_write_error_is_retried_by_the_coordinator(
     hass: HomeAssistant,
     aioclient_mock: AiohttpClientMocker,
     hass_storage: dict[str, Any],
+    freezer: FrozenDateTimeFactory,
 ) -> None:
     """A write error Store swallows keeps the command working; a refresh retries."""
     fake = FakeBRP069(half_degree=False)
@@ -222,7 +225,9 @@ async def test_write_error_is_retried_by_the_coordinator(
     assert state.attributes[ATTR_TARGET_TEMP_STEP] == 1.0
     assert key not in hass_storage
 
-    await entry.runtime_data.async_refresh()
+    freezer.tick(timedelta(seconds=TIMEOUT_SEC + 1))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert hass_storage[key]["data"]["status"] == "inferred"
 
 

@@ -20,6 +20,8 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.storage import Store
 
+from .const import DOMAIN
+
 _LOGGER = logging.getLogger(__name__)
 
 STORAGE_VERSION = 1
@@ -156,9 +158,13 @@ class DaikinTemperatureStep:
         """Send settings to the device, then store a newly learned step.
 
         A storage failure never fails the command; the save is retried with
-        the next coordinator update.
+        the next coordinator update. After unloading, nothing is sent.
         """
         async with self._lock:
+            if self._closed:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN, translation_key="entry_unloaded"
+                )
             try:
                 await self._device.set(settings)
             finally:
@@ -183,7 +189,7 @@ class DaikinTemperatureStep:
             self._device.target_temperature_step_status = "unknown"
 
     async def async_close(self) -> None:
-        """Wait for a running command and stop saving."""
+        """Wait for a running command, then refuse commands and saves."""
         async with self._lock:
             self._closed = True
 

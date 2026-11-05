@@ -65,6 +65,9 @@
     "demand_control_unsupported": {
       "message": "This Daikin device does not support demand control."
     },
+    "entry_unloaded": {
+      "message": "The Daikin integration is unloading; the command was not sent."
+    },
     "error_communicating": {
       "message": "Error communicating with Daikin device: {error}"
     },

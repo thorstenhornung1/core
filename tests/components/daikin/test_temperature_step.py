@@ -283,17 +283,19 @@ async def test_reset_waits_for_running_command(
     assert stored(hass_storage) is None
 
 
-async def test_closed_store_saves_nothing(
+async def test_closed_store_sends_and_saves_nothing(
     hass: HomeAssistant, hass_storage: dict[str, Any]
 ) -> None:
-    """After unloading, a late command no longer writes the store."""
+    """After unloading, a late command is refused and nothing is written."""
     device = make_device()
     step = DaikinTemperatureStep(hass, ENTRY_ID, device)
     await step.async_close()
     learns(device, "inferred")
 
-    await step.async_set({"stemp": "22.5"})
-    assert device.set.await_count == 1
+    with pytest.raises(HomeAssistantError) as err:
+        await step.async_set({"stemp": "22.5"})
+    assert err.value.translation_key == "entry_unloaded"
+    device.set.assert_not_awaited()
     assert stored(hass_storage) is None
 
 
