@@ -8,9 +8,10 @@ from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 import logging
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from pydaikin.daikin_base import Appliance
+from pydaikin.daikin_brp069 import DaikinBRP069
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -30,11 +31,11 @@ class DaikinStepResetError(Exception):
     """Unable to remove the persisted temperature step."""
 
 
-def supports_step_learning(device: Appliance) -> bool:
-    """Only BRP069-style devices with an optimistic half-degree step learn it."""
+def supports_step_learning(device: Appliance) -> TypeGuard[DaikinBRP069]:
+    """Narrow to half-degree learning BRP069-family devices, excluding AirBase."""
     return (
-        hasattr(device, "target_temperature_step_status")
-        and getattr(type(device), "TARGET_TEMPERATURE_STEP", None) == 0.5
+        isinstance(device, DaikinBRP069)
+        and type(device).TARGET_TEMPERATURE_STEP == 0.5
     )
 
 
@@ -57,7 +58,7 @@ class DaikinTemperatureStep:
     """Store pydaikin's learning status; never infer device capabilities in HA."""
 
     def __init__(
-        self, hass: HomeAssistant, entry: ConfigEntry, device: Appliance
+        self, hass: HomeAssistant, entry: ConfigEntry, device: DaikinBRP069
     ) -> None:
         """Initialize one per-config-entry persistence adapter."""
         self.hass = hass
