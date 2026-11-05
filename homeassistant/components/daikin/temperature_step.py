@@ -202,13 +202,13 @@ class DaikinTemperatureStep:
             "learned_at": datetime.now(UTC).isoformat(),
         }
         if self._record is not None:
+            mismatch, additions = self._identity_changes()
+            if mismatch:
+                # Never persist any learned result against a different device.
+                await self._async_invalidate_locked()
+                return
             if self._record.get("status") == status:
                 # Missing identity fields may become available after learning.
-                mismatch, additions = self._identity_changes()
-                if mismatch:
-                    # Never persist a learned status against a different device.
-                    await self._async_invalidate_locked()
-                    return
                 if not additions:
                     return
                 record = {**self._record, **additions}
