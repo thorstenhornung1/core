@@ -90,6 +90,10 @@ class DaikinTemperatureStep:
             "firmware_version": _text_or_none(values.get("ver")),
         }
 
+    def _current_identity_complete(self) -> bool:
+        """Tell whether this appliance currently exposes the full fingerprint."""
+        return all(value is not None for value in self._identity().values())
+
     def _identity_changes(self) -> tuple[bool, dict[str, str]]:
         """Return mismatch and newly known fields in the current record."""
         if self._record is None:
@@ -146,8 +150,9 @@ class DaikinTemperatureStep:
             elif additions:
                 record = {**self._record, **additions}
                 await self._async_save_locked(record)
-            if self._record is None or all(
-                self._record.get(field) is not None for field in _IDENTITY_FIELDS
+            if self._record is None or (
+                self._current_identity_complete()
+                and all(self._record.get(field) is not None for field in _IDENTITY_FIELDS)
             ):
                 self._stop_watching()
 
@@ -246,7 +251,10 @@ class DaikinTemperatureStep:
             or self._record is None
             or self._coordinator is None
             or self._unsub_identity is not None
-            or all(self._record.get(key) is not None for key in _IDENTITY_FIELDS)
+            or (
+                self._current_identity_complete()
+                and all(self._record.get(key) is not None for key in _IDENTITY_FIELDS)
+            )
         ):
             return
         self._unsub_identity = self._coordinator.async_add_listener(
@@ -264,6 +272,8 @@ class DaikinTemperatureStep:
             return
         mismatch, additions = self._identity_changes()
         if not mismatch and not additions:
+            if self._current_identity_complete():
+                self._stop_watching()
             return
         self._identity_task = self.entry.async_create_background_task(
             self.hass,
