@@ -12,13 +12,21 @@ from pydaikin.discovery import Discovery
 from pydaikin.exceptions import DaikinException
 from pydaikin.factory import DaikinFactory
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntryState,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_API_KEY, CONF_HOST, CONF_PASSWORD, CONF_UUID
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from homeassistant.util.ssl import client_context_no_verify
 
 from .const import DOMAIN, KEY_MAC, TIMEOUT_SEC
+from .coordinator import DaikinConfigEntry
+from .temperature_step import DaikinStepResetError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +35,15 @@ class FlowHandler(ConfigFlow, domain=DOMAIN):
     """Handle a config flow."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    @override
+    def async_get_options_flow(
+        config_entry: DaikinConfigEntry,
+    ) -> DaikinOptionsFlow:
+        """Return the flow for inspecting and resetting learned step detection."""
+        return DaikinOptionsFlow()
 
     def __init__(self) -> None:
         """Initialize the Daikin config flow."""
@@ -161,3 +178,59 @@ class FlowHandler(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
         self.host = discovery_info.host
         return await self.async_step_user()
+
+
+class DaikinOptionsFlow(OptionsFlow):
+    """Show the learned step and let users explicitly reset it."""
+
+    @override
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show current detection before offering reset."""
+        if self.config_entry.state is not ConfigEntryState.LOADED:
+            return self.async_abort(reason="step_not_loaded")
+
+        step = self.config_entry.runtime_data.temperature_step
+        if step is None:
+            return self.async_abort(reason="step_fixed")
+        if step.status == "unknown":
+            return self.async_abort(reason="step_unknown")
+
+        if user_input is not None:
+            return await self.async_step_confirm_reset()
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=probatio.Schema({}),
+            description_placeholders={
+                "step": str(step.device.target_temperature_step)
+            },
+        )
+
+    async def async_step_confirm_reset(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Confirm and perform a storage-first, device-free reset."""
+        if self.config_entry.state is not ConfigEntryState.LOADED:
+            return self.async_abort(reason="step_not_loaded")
+        step = self.config_entry.runtime_data.temperature_step
+        if step is None:
+            return self.async_abort(reason="step_fixed")
+        if step.status == "unknown":
+            return self.async_abort(reason="step_unknown")
+
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                await step.async_reset()
+            except DaikinStepResetError:
+                errors["base"] = "reset_failed"
+            else:
+                return self.async_abort(reason="reset_successful")
+
+        return self.async_show_form(
+            step_id="confirm_reset",
+            data_schema=probatio.Schema({}),
+            errors=errors,
+        )
