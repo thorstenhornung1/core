@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from freezegun.api import FrozenDateTimeFactory
 from pydaikin.daikin_brp069 import DaikinBRP069
-from pydaikin.exceptions import DaikinCommandRejected
+from pydaikin.exceptions import DaikinCommandRejected, DaikinVerificationError
 import pytest
 from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 from pytest_homeassistant.test_util.aiohttp import (
@@ -45,10 +45,17 @@ CONTROL = (
 class FakeBRP069:
     """A stateful BRP069 adapter behind the aiohttp client mock."""
 
-    def __init__(self, *, half_degree: bool, ver: str | None = "1_14_88") -> None:
+    def __init__(
+        self,
+        *,
+        half_degree: bool,
+        ver: str | None = "1_14_88",
+        heating_range: tuple[int, int] | None = None,
+    ) -> None:
         """Initialize the fake adapter."""
         self.half_degree = half_degree
         self.ver = ver
+        self.heating_range = heating_range
         self.stemp = "22.0"
         self.writes: list[str] = []
 
@@ -81,6 +88,10 @@ class FakeBRP069:
             self.writes.append(stemp)
             if stemp.endswith(".5") and not self.half_degree:
                 return "ret=PARAM NG"
+            if self.heating_range is not None:
+                # Like the BRP069, clamp silently to the range of the mode
+                low, high = self.heating_range
+                stemp = f"{min(max(float(stemp), low), high):.1f}"
             self.stemp = stemp
             return "ret=OK"
         return "ret=OK"
@@ -327,17 +338,104 @@ async def test_options_flow_reset(
 
 
 @pytest.mark.usefixtures("real_factory")
+@pytest.mark.parametrize(
+    ("choice", "reason", "status", "stored"),
+    [
+        pytest.param("keep", "step_kept", "confirmed", True, id="keep"),
+        pytest.param("reset", "reset_successful", "unknown", False, id="reset"),
+    ],
+)
 async def test_options_flow_confirmed_menu(
-    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+    hass: HomeAssistant,
+    aioclient_mock: AiohttpClientMocker,
+    hass_storage: dict[str, Any],
+    choice: str,
+    reason: str,
+    status: str,
+    stored: bool,
 ) -> None:
-    """A confirmed half degree shows its own menu text."""
+    """A confirmed half degree has its own menu to keep or reset it."""
     _register(aioclient_mock, FakeBRP069(half_degree=True))
     entry = await _setup(hass)
     await _set_temperature(hass, 22.5)
+    requests = aioclient_mock.call_count
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert result["type"] is FlowResultType.MENU
     assert result["step_id"] == "confirmed"
+    assert result["menu_options"] == ["keep", "reset"]
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": choice}
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == reason
+    assert aioclient_mock.call_count == requests
+    assert entry.runtime_data.device.target_temperature_step_status == status
+    assert hass.states.get(_climate(hass)).attributes[ATTR_TARGET_TEMP_STEP] == 0.5
+    assert (STORAGE_KEY.format(entry.entry_id) in hass_storage) is stored
+
+
+@pytest.mark.usefixtures("real_factory")
+@pytest.mark.parametrize(
+    ("temperature", "clamped"),
+    [
+        pytest.param(35, "30.0", id="above"),
+        pytest.param(8, "10.0", id="below"),
+    ],
+)
+async def test_clamped_whole_degree_learns_nothing(
+    hass: HomeAssistant,
+    aioclient_mock: AiohttpClientMocker,
+    hass_storage: dict[str, Any],
+    temperature: int,
+    clamped: str,
+) -> None:
+    """A whole degree the unit clamps to its heating range proves no step."""
+    fake = FakeBRP069(half_degree=True, heating_range=(10, 30))
+    _register(aioclient_mock, fake)
+    entry = await _setup(hass)
+
+    await _set_temperature(hass, temperature)
+
+    assert fake.writes == [str(temperature)]
+    assert fake.stemp == clamped
+    state = hass.states.get(_climate(hass))
+    assert state.attributes[ATTR_TEMPERATURE] == float(clamped)
+    assert state.attributes[ATTR_TARGET_TEMP_STEP] == 0.5
+    assert entry.runtime_data.device.target_temperature_step_status == "unknown"
+    assert STORAGE_KEY.format(entry.entry_id) not in hass_storage
+
+
+@pytest.mark.usefixtures("real_factory")
+@pytest.mark.parametrize(
+    ("temperature", "clamped"),
+    [
+        pytest.param(30.5, "30.0", id="above"),
+        pytest.param(9.5, "10.0", id="below"),
+    ],
+)
+async def test_clamped_half_degree_fails_and_learns_nothing(
+    hass: HomeAssistant,
+    aioclient_mock: AiohttpClientMocker,
+    hass_storage: dict[str, Any],
+    temperature: float,
+    clamped: str,
+) -> None:
+    """A clamped half degree reads back differently; nothing is learned."""
+    fake = FakeBRP069(half_degree=True, heating_range=(10, 30))
+    _register(aioclient_mock, fake)
+    entry = await _setup(hass)
+
+    # The integration does not translate pydaikin command errors yet
+    with pytest.raises(DaikinVerificationError):
+        await _set_temperature(hass, temperature)
+
+    assert fake.writes == [str(temperature)]
+    assert fake.stemp == clamped
+    assert entry.runtime_data.device.target_temperature_step_status == "unknown"
+    assert hass.states.get(_climate(hass)).attributes[ATTR_TARGET_TEMP_STEP] == 0.5
+    assert STORAGE_KEY.format(entry.entry_id) not in hass_storage
 
 
 @pytest.mark.usefixtures("real_factory")
