@@ -186,7 +186,6 @@ class DaikinClimate(DaikinEntity, ClimateEntity):
     _attr_name = None
     _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_hvac_modes = list(HA_STATE_TO_DAIKIN)
-    _attr_target_temperature_step = 1
     _attr_fan_modes: list[str]
     _attr_swing_modes: list[str]
 
@@ -242,8 +241,17 @@ class DaikinClimate(DaikinEntity, ClimateEntity):
                     _LOGGER.error("Invalid temperature %s", value)
 
         if values:
-            await self.device.set(values)
+            if (step := self.coordinator.temperature_step) is not None:
+                await step.async_set(values)
+            else:
+                await self.device.set(values)
             await self.coordinator.async_refresh()
+
+    @property
+    @override
+    def target_temperature_step(self) -> float:
+        """Return the target temperature step reported by pydaikin."""
+        return self.device.target_temperature_step
 
     @property
     @override
